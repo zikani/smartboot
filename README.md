@@ -20,7 +20,7 @@ These scripts facilitate the creation of bootable USB drives from ISO files on W
 ## Usage
 
 1. Clone this repository:
-git clone https://github.com/zikani/smartboot.git
+https://github.com/zikani/smartboot.git
 
 
 2. Run the script:
