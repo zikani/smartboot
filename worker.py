@@ -1,22 +1,34 @@
+import sys
+import os
 import subprocess
+import logging
+from PyQt5.QtWidgets import (QApplication, QLabel, QMainWindow, QPushButton, 
+                             QVBoxLayout, QWidget, QFileDialog, QMessageBox)
 from PyQt5.QtCore import QThread, pyqtSignal
 import platform
+import ctypes
 
-
-
-class Worker(QThread):
+# USBWorker thread for handling USB creation
+class USBWorker(QThread):
+    # PyQt5 signals to notify progress, errors, and completion
     progress_update = pyqtSignal(int)
     error_occurred = pyqtSignal(str)
     usb_creation_completed = pyqtSignal()
 
-    
-
     def __init__(self):
         super().__init__()
+        self.iso_list = []
+        self.drive_path = ''
+        self.file_system = ''
+        self.volume_label = ''
+        self.selected_device = ''
+        self.selected_boot_type = ''
+        self.selected_partition_scheme = ''
 
-    def set_arguments(self, iso_path, drive_path, file_system, volume_label, selected_device, selected_boot_type,
-                     selected_partition_scheme):
-        self.iso_path = iso_path
+    # Set arguments for USB creation process
+    def set_arguments(self, iso_list, drive_path, file_system, volume_label, 
+                      selected_device, selected_boot_type, selected_partition_scheme):
+        self.iso_list = iso_list
         self.drive_path = drive_path
         self.file_system = file_system
         self.volume_label = volume_label
@@ -26,112 +38,154 @@ class Worker(QThread):
 
     def run(self):
         try:
+            self.check_system_requirements()
             self.create_bootable_usb()
             self.usb_creation_completed.emit()
         except Exception as e:
             self.error_occurred.emit(str(e))
+            logging.error(f"Error during USB creation: {e}")
 
+    # Check system requirements
+    def check_system_requirements(self):
+        if not self.is_user_admin():
+            raise PermissionError("Administrative privileges are required.")
+
+        required_tools = ["dd", "mkfs.ext4", "mkfs.ntfs", "grub-install", "syslinux"]
+        missing_tools = [tool for tool in required_tools if not self.is_tool_installed(tool)]
+
+        if missing_tools:
+            raise EnvironmentError(f"Required tools are missing: {', '.join(missing_tools)}")
+
+        drive_space = self.get_free_space(self.drive_path)
+        required_space = self.estimate_iso_size(self.iso_list)
+
+        if drive_space < required_space:
+            raise ValueError(f"Insufficient space: Required {required_space} bytes, Available {drive_space} bytes.")
+
+    # Check if the script is running as an administrator
+    def is_user_admin(self):
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin()
+        except:
+            return False
+
+    # Verify if the necessary system tool is available
+    def is_tool_installed(self, tool):
+        return subprocess.call(["which", tool], stdout=subprocess.PIPE, stderr=subprocess.PIPE) == 0
+
+    # Get available space on the USB drive
+    def get_free_space(self, drive_path):
+        statvfs = os.statvfs(drive_path)
+        return statvfs.f_frsize * statvfs.f_bavail
+
+    # Calculate total size of all the ISO files
+    def estimate_iso_size(self, iso_list):
+        total_size = sum(os.path.getsize(iso_path) for iso_path in iso_list)
+        return total_size
+
+    # Manage the overall process of creating the bootable USB
     def create_bootable_usb(self):
         self.format_usb_drive()
         self.copy_iso_to_usb()
         self.install_bootloader()
 
-    def format_usb_drive(drive_number, file_system, volume_label, quick_format=True, log_file_path="formatting_log.txt"):
-        try:
-            if not drive_number or not file_system or not volume_label:
-                raise ValueError("Drive number, file system, and volume label must be provided.")
+    # Format the USB drive
+    def format_usb_drive(self):
+        if platform.system() == "Windows":
+            self.format_on_windows()
+        else:
+            self.format_on_linux()
 
-            if platform.system() == "Windows":
-                import wmi
+    def format_on_windows(self):
+        import wmi
+        c = wmi.WMI()
+        selected_disk = self.get_selected_disk_windows(c)
+        if not selected_disk:
+            raise ValueError("Disk not found.")
+        selected_disk.FormatFileSystem(Format=self.file_system, QuickFormat=True, VolumeName=self.volume_label)
 
-                c = wmi.WMI()
+    def format_on_linux(self):
+        supported_filesystems = ["vfat", "ntfs", "ext2", "ext3", "ext4"]
+        if self.file_system.lower() not in supported_filesystems:
+            raise ValueError(f"Unsupported file system: {self.file_system}")
+        subprocess.run(["mkfs." + self.file_system, "-n", self.volume_label, self.drive_path], check=True)
 
-                disks = c.Win32_DiskDrive()
-
-                selected_disk = None
-                for disk in disks:
-                    if str(disk.Index) == drive_number:
-                        selected_disk = disk
-                        break
-
-                if not selected_disk:
-                    raise ValueError("Disk not found.")
-
-                print(f"Formatting disk {selected_disk.Caption}...")
-                disk = c.Win32_DiskDrive(Index=int(drive_number))
-                for part in disk.Partitions():
-                    part.Delete()
-
-                disk.FormatFileSystem(Format=file_system, QuickFormat=quick_format, VolumeName=volume_label)
-                print(f"Disk {selected_disk.Caption} formatted successfully.")
-            else:
-                supported_filesystems = ["vfat", "ntfs", "ext2", "ext3", "ext4"]
-                if file_system.lower() not in supported_filesystems:
-                    raise ValueError(f"Unsupported file system: {file_system}")
-
-                subprocess.run(["mkfs." + file_system, "-n", volume_label, drive_number], check=True)
-                print(f"USB drive formatted with {file_system} file system and label '{volume_label}'.")
-        except Exception as e:
-            print("Failed to format the disk:", e)
-            
-
-    
-                
-
+    # Copy ISO files to the USB drive
     def copy_iso_to_usb(self):
-        try:
-            subprocess.run(["dd", "if=" + self.iso_path, "of=" + self.drive_path, "bs=4M"], check=True)
-
-            iso_hash = self.get_iso_hash(self.iso_path)
-            drive_hash = self.get_drive_hash(self.drive_path)
-
-            if iso_hash != drive_hash:
-                raise ValueError("MD5 checksums don't match. Copy operation might have failed.")
-            print("ISO copied successfully and verified!")
-        except subprocess.CalledProcessError as e:
-            raise ValueError(f"Failed to copy ISO to USB: {e}")
-        
-    
-
-    
-
-
-    def get_iso_hash(self, iso_path):
-        # Placeholder for actual MD5 checksum calculation
-        return "placeholder_iso_hash"
-
-    def get_drive_hash(self, drive_path):
-        # Placeholder for actual MD5 checksum calculation
-        return "placeholder_drive_hash"
+        for iso in self.iso_list:
+            subprocess.run(["dd", f"if={iso}", f"of={self.drive_path}", "bs=4M", "conv=fdatasync"], check=True)
 
     def install_bootloader(self):
         if self.selected_boot_type == "UEFI":
-            if self.selected_partition_scheme == "GPT":
-                try:
-                    subprocess.run([
-                        "grub-install",
-                        "--target=x86_64-efi",
-                        "--efi-directory=/boot/efi",
-                        "--bootloader-id=grub",
-                        "--removable",
-                        self.drive_path
-                    ], check=True)
-                except subprocess.CalledProcessError as e:
-                    raise ValueError(f"Failed to install GRUB bootloader for UEFI (GPT): {e}")
-            elif self.selected_partition_scheme == "MBR":
-                try:
-                    subprocess.run([
-                        "grub-install",
-                        "--target=i386-efi",
-                        "--efi-directory=/boot/efi",
-                        "--bootloader-id=grub",
-                        "--removable",
-                        self.drive_path
-                    ], check=True)
-                except subprocess.CalledProcessError as e:
-                    raise ValueError(f"Failed to install GRUB bootloader for UEFI (MBR): {e}")
+            self.install_grub()
         elif self.selected_boot_type == "Legacy":
-            try:
-                subprocess.run(["syslinux", "--install", self.drive_path], check=True)
-            except subprocess.CalledProcessError as e:
-                raise ValueError(f"Failed to install Syslinux bootloader for Legacy: {e}")
+            self.install_syslinux()
+
+    def install_grub(self):
+        subprocess.run(["grub-install", "--target=x86_64-efi", "--removable", self.drive_path], check=True)
+
+    def install_syslinux(self):
+        subprocess.run(["syslinux", "--install", self.drive_path], check=True)
+
+
+# MainWindow class for handling the UI and interactions
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle('Smart Boot Creator')
+        self.setGeometry(100, 100, 600, 400)
+        self.initUI()
+        self.usb_worker = None
+
+    def initUI(self):
+        # QLabel to show status
+        self.status_label = QLabel("Status: Ready", self)
+        self.status_label.setGeometry(10, 10, 500, 30)
+
+        # QPushButton to start bootable USB creation
+        self.create_button = QPushButton("Create Bootable USB", self)
+        self.create_button.setGeometry(10, 50, 200, 30)
+        self.create_button.clicked.connect(self.confirm_create_bootable)
+
+        # Layout and central widget
+        layout = QVBoxLayout()
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.create_button)
+
+        central_widget = QWidget()
+        central_widget.setLayout(layout)
+        self.setCentralWidget(central_widget)
+
+    def confirm_create_bootable(self):
+        # Start the bootable USB creation process
+        iso_files, _ = QFileDialog.getOpenFileNames(self, "Select ISO Files", "", "ISO Files (*.iso)")
+        drive_path = QFileDialog.getExistingDirectory(self, "Select USB Drive")
+        if iso_files and drive_path:
+            self.status_label.setText("Creating bootable USB...")
+            self.start_usb_creation(iso_files, drive_path)
+        else:
+            QMessageBox.warning(self, "Warning", "Please select ISO files and a USB drive.")
+
+    def start_usb_creation(self, iso_list, drive_path):
+        self.usb_worker = USBWorker()
+        self.usb_worker.set_arguments(
+            iso_list, drive_path, file_system="vfat", volume_label="BOOTABLE",
+            selected_device="sdb", selected_boot_type="UEFI", selected_partition_scheme="GPT"
+        )
+        self.usb_worker.error_occurred.connect(self.handle_error)
+        self.usb_worker.usb_creation_completed.connect(self.handle_completion)
+        self.usb_worker.start()
+
+    def handle_error(self, error_message):
+        self.status_label.setText(f"Error: {error_message}")
+
+    def handle_completion(self):
+        self.status_label.setText("Bootable USB creation completed!")
+
+
+# Main entry point
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
