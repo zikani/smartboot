@@ -2,39 +2,75 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QPushButton,
                              QVBoxLayout, QFileDialog, QMessageBox, 
                              QProgressBar, QComboBox, QSystemTrayIcon, 
                              QAction, QMenu, QStyle, QGroupBox, 
-                             QRadioButton, QCheckBox)
-from PyQt5.QtCore import Qt
+                             QRadioButton, QCheckBox, QHBoxLayout)
+from PyQt5.QtCore import Qt, QTimer
 from worker import USBWorker
 import os
 import ctypes
 import logging
+from config import UI_CONFIG, SUPPORTED_FILESYSTEMS, SUPPORTED_BOOTLOADERS, SUPPORTED_PARTITION_SCHEMES
+from utils import get_removable_drives, verify_iso_integrity, get_drive_space_info, is_windows_bootable_image
+from features.update_checker import UpdateChecker
+from features.backup_manager import BackupManager
+import asyncio
 
 class SmartBootUI(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Smart Boot")
-        self.resize(480, 400)
+        self.setWindowTitle(UI_CONFIG['window_title'])
+        self.resize(UI_CONFIG['window_width'], UI_CONFIG['window_height'])
 
         # Logging setup
         logging.basicConfig(filename="smartboot.log", level=logging.INFO, 
                             format="%(asctime)s - %(levelname)s - %(message)s")
 
         self.worker = USBWorker()
-        self.worker.progress_update.connect(self.update_progress_bar)
-        self.worker.usb_creation_completed.connect(self.handle_worker_finished)
-
-        self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-        self.tray_icon.setToolTip("Smart Boot")
-        self.create_tray_menu()
+        self.setup_worker_connections()
+        self.setup_tray_icon()
 
         self.iso_list = []
-        self.initUI()
+        self.cancel_requested = False
+        self.update_checker = UpdateChecker()
+        self.backup_manager = BackupManager()
+        
+        # Replace direct call with async handler
+        QTimer.singleShot(0, self.init_async)
+        
+        self.setup_ui()
+
+    def init_async(self):
+        """Initialize async operations."""
+        loop = asyncio.get_event_loop()
+        if not loop.is_running():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.create_task(self.check_for_updates())
+
+    def setup_worker_connections(self):
+        """Setup worker signal connections with error handling."""
+        self.worker.progress_update.connect(self.update_progress_bar)
+        self.worker.usb_creation_completed.connect(self.handle_worker_finished)
+        self.worker.error_occurred.connect(self.handle_worker_error)
+        self.worker.status_update.connect(self.handle_worker_status)
+
+    def handle_worker_error(self, error_message):
+        """Handle worker errors."""
+        QMessageBox.critical(self, "Error", f"An error occurred: {error_message}")
+        self.status_label.setText(f"Error: {error_message}")
+        logging.error(f"Worker error: {error_message}")
+        self.progress_bar.setVisible(False)
+        self.finish_operation()
 
     def closeEvent(self, event):
         event.ignore()
         self.hide()
         self.tray_icon.show()
+
+    def setup_tray_icon(self):
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+        self.tray_icon.setToolTip("Smart Boot")
+        self.create_tray_menu()
 
     def create_tray_menu(self):
         tray_menu = QMenu(self)
@@ -46,8 +82,13 @@ class SmartBootUI(QWidget):
         tray_menu.addAction(exit_action)
         self.tray_icon.setContextMenu(tray_menu)
 
-    def initUI(self):
+    def setup_ui(self):
         layout = QVBoxLayout()
+
+        # Status Message
+        self.status_message = QLabel("Ready")
+        self.status_message.setStyleSheet("color: #666; font-style: italic;")
+        layout.addWidget(self.status_message)
 
         # Drag and Drop Area
         self.drag_drop_label = QLabel("Drag and drop ISO file(s) here")
@@ -59,8 +100,8 @@ class SmartBootUI(QWidget):
         self.drag_drop_label.dropEvent = self.dropEvent
         self.drag_drop_label.dragEnterEvent = self.dragEnterEvent
 
-        # Select Drive ComboBox
-        self.create_drive_combobox(layout)
+        # Drive Selection with Details
+        self.create_drive_selection_group(layout)
 
         # Checkbox for Auto Determine Settings
         self.auto_determine_checkbox = QCheckBox("Auto Determine Settings")
@@ -73,17 +114,30 @@ class SmartBootUI(QWidget):
         # OS Type Selection
         self.create_os_type_selection(layout)
 
-        # Browse ISO Button
-        self.create_button(layout, "Browse ISO", self.add_iso_to_usb)
+        # Button Group
+        button_layout = QHBoxLayout()
+        self.create_button(button_layout, "Browse ISO", self.add_iso_to_usb)
+        self.create_button(button_layout, "Create Bootable USB", self.confirm_create_bootable)
+        self.cancel_button = self.create_button(button_layout, "Cancel", self.cancel_operation)
+        self.cancel_button.setEnabled(False)
+        layout.addLayout(button_layout)
 
-        # Create Bootable USB Button
-        self.create_button(layout, "Create Bootable USB", self.confirm_create_bootable)
-
-        # Progress Bar
-        self.progress_bar = self.create_progress_bar(layout)
-
-        # Status Label
-        self.status_label = self.create_label(layout)
+        # Progress Section
+        progress_group = QGroupBox("Progress")
+        progress_layout = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setVisible(False)
+        self.status_label = QLabel()
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.status_label)
+        progress_group.setLayout(progress_layout)
+        layout.addWidget(progress_group)
+        
+        # Add backup/restore buttons
+        backup_layout = QHBoxLayout()
+        self.create_button(backup_layout, "Backup Configuration", self.backup_config)
+        self.create_button(backup_layout, "Restore Configuration", self.restore_config)
+        layout.addLayout(backup_layout)
 
         self.setLayout(layout)
 
@@ -109,11 +163,55 @@ class SmartBootUI(QWidget):
 
         layout.addWidget(self.os_type_group)
 
-    def create_drive_combobox(self, layout):
+    def create_drive_selection_group(self, layout):
+        drive_group = QGroupBox("USB Drive Selection")
+        drive_layout = QVBoxLayout()
+        
+        # Create the drive details label first
+        self.drive_details = QLabel()
+        self.drive_details.setStyleSheet("color: #666;")
+        
+        # Create and setup combo box
         self.drive_combo = QComboBox()
-        self.drive_combo.addItems(self.get_removable_drives())
-        layout.addWidget(QLabel("Select USB Drive:"))
-        layout.addWidget(self.drive_combo)
+        self.drive_combo.currentIndexChanged.connect(self.update_drive_details)
+        
+        # Create refresh button
+        refresh_button = QPushButton("Refresh Drives")
+        refresh_button.clicked.connect(self.refresh_drive_list)
+        
+        # Add widgets to layout in desired order
+        drive_layout.addWidget(self.drive_combo)
+        drive_layout.addWidget(refresh_button)
+        drive_layout.addWidget(self.drive_details)
+        
+        drive_group.setLayout(drive_layout)
+        layout.addWidget(drive_group)
+        
+        # Populate the drive list after all UI elements are created
+        self.refresh_drive_list()
+
+    def refresh_drive_list(self):
+        """Refresh the list of available USB drives."""
+        if hasattr(self, 'drive_combo'):  # Check if combo box exists
+            self.drive_combo.clear()
+            drives = get_removable_drives()
+            for drive, label, size in drives:
+                self.drive_combo.addItem(f"{drive} ({label}) - {size}")
+            self.update_drive_details()
+
+    def update_drive_details(self):
+        """Update the drive details label based on selected drive."""
+        if not hasattr(self, 'drive_details'):  # Check if label exists
+            return
+            
+        if self.drive_combo.currentText():
+            drive = self.drive_combo.currentText().split()[0]
+            total, used, free = get_drive_space_info(drive)
+            self.drive_details.setText(
+                f"Total: {total}\nUsed: {used}\nFree: {free}"
+            )
+        else:
+            self.drive_details.setText("No drive selected")
 
     def create_options_group(self, layout):
         """Create a group box for advanced options like Partition Scheme and Bootloader."""
@@ -122,38 +220,25 @@ class SmartBootUI(QWidget):
 
         # Partition Scheme
         self.partition_combo = QComboBox()
-        self.partition_combo.addItems(["MBR", "GPT"])
+        self.partition_combo.addItems(SUPPORTED_PARTITION_SCHEMES)
         options_layout.addWidget(QLabel("Partition Scheme:"))
         options_layout.addWidget(self.partition_combo)
 
         # Bootloader Type
         self.bootloader_combo = QComboBox()
-        self.bootloader_combo.addItems(["UEFI", "Legacy"])
+        self.bootloader_combo.addItems(SUPPORTED_BOOTLOADERS)
         options_layout.addWidget(QLabel("Bootloader Type:"))
         options_layout.addWidget(self.bootloader_combo)
 
         options_group.setLayout(options_layout)
         layout.addWidget(options_group)
 
-    def get_removable_drives(self):
-        """Get a list of removable drives (USB drives) on the system."""
-        removable_drives = []
-        drives = [f"{chr(d)}:\\" for d in range(65, 91)]  # Drive letters from A to Z
-        for drive in drives:
-            if os.path.exists(drive) and self.is_removable_drive(drive):
-                removable_drives.append(drive)
-        return removable_drives
-
-    def is_removable_drive(self, drive):
-        """Check if the drive is removable."""
-        drive_type = ctypes.windll.kernel32.GetDriveTypeW(drive)
-        return drive_type == 2  # DRIVE_REMOVABLE
-
     def handle_worker_finished(self):
         self.progress_bar.setVisible(False)
         self.status_label.setText("Bootable USB creation completed.")
         self.show_notification("USB Creation Completed", "The bootable USB creation process has finished.")
         logging.info("Bootable USB creation completed successfully.")
+        self.finish_operation()
 
     def show_notification(self, title, message):
         self.tray_icon.showMessage(title, message, QSystemTrayIcon.Information, 5000)
@@ -168,6 +253,7 @@ class SmartBootUI(QWidget):
         button = QPushButton(button_text)
         button.clicked.connect(on_click_function)
         layout.addWidget(button)
+        return button
 
     def create_label(self, layout):
         label = QLabel()  # Create a new label
@@ -193,8 +279,19 @@ class SmartBootUI(QWidget):
             event.ignore()
 
     def add_iso_file(self, path):
-        self.drag_drop_label.setText("ISO file(s): " + ", ".join(self.iso_list + [path]))  # Update the label with the ISO path
-        self.iso_list.append(path)  # Add to list of ISOs
+        # Verify Windows image compatibility
+        if path.lower().endswith(('.iso', '.wim', '.esd')):
+            if path.lower().endswith('.iso') and not verify_iso_integrity(path):
+                QMessageBox.warning(self, "Invalid File", "ISO file verification failed.")
+                return
+            self.iso_list.append(path)
+            self.drag_drop_label.setText("Image file(s): " + ", ".join(self.iso_list))
+            # Auto-select Windows if Windows image detected
+            if is_windows_bootable_image(path):
+                self.windows_radio.setChecked(True)
+                self.auto_determine_settings()
+        else:
+            QMessageBox.warning(self, "Invalid File", "Please select a valid ISO, WIM, or ESD file.")
 
     def add_iso_to_usb(self):
         options = QFileDialog.Options()
@@ -227,21 +324,22 @@ class SmartBootUI(QWidget):
             self.create_bootable()
 
     def auto_determine_settings(self):
-        """Automatically determine bootloader, filesystem, and cluster size based on the ISO."""
-        if self.windows_radio.isChecked():
-            # Windows settings
-            self.selected_boot_type = self.bootloader_combo.currentText()  # Get selected bootloader type
-            self.file_system = "NTFS"  # Generally, Windows uses NTFS
-            self.selected_partition_scheme = self.partition_combo.currentText()  # Use user-selected partition scheme
-        elif self.linux_radio.isChecked():
-            # Linux settings
+        """Automatically determine settings based on image type."""
+        if self.windows_radio.isChecked() or any(is_windows_bootable_image(iso) for iso in self.iso_list):
+            self.selected_boot_type = "UEFI"
+            self.file_system = "NTFS"
+            self.selected_partition_scheme = "GPT"
+            # Update UI to reflect Windows settings
+            self.bootloader_combo.setCurrentText("UEFI")
+            self.partition_combo.setCurrentText("GPT")
+        else:
+            # ...existing Linux settings...
             self.selected_boot_type = self.bootloader_combo.currentText()  # Use user-selected bootloader type
             if "iso9660" in self.iso_list[0].lower():  # Check if it's a common Linux format
                 self.file_system = "ext4"  # Set a common filesystem for Linux
             else:
                 self.file_system = "FAT32"  # Use FAT32 for compatibility with older systems
             self.selected_partition_scheme = self.partition_combo.currentText()  # Use user-selected partition scheme
-
 
     def create_preview_message(self):
         """Create a preview message for the confirmation dialog."""
@@ -277,10 +375,82 @@ class SmartBootUI(QWidget):
         )
                 
         self.worker.start()
-        self.progress_bar.setVisible(True)  # Show progress bar
+        self.start_operation()
 
     def update_progress_bar(self, value):
         self.progress_bar.setValue(value)
+
+    def cancel_operation(self):
+        """Cancel the current USB creation operation."""
+        if self.worker and self.worker.isRunning():
+            self.cancel_requested = True
+            self.worker.cancel()
+            self.status_message.setText("Cancelling operation...")
+            self.cancel_button.setEnabled(False)
+
+    def handle_worker_status(self, status):
+        """Handle status updates from worker."""
+        self.status_message.setText(status)
+
+    def start_operation(self):
+        """Start USB creation operation."""
+        self.cancel_requested = False
+        self.cancel_button.setEnabled(True)
+        self.create_button.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+
+    def finish_operation(self):
+        """Clean up after operation completes."""
+        self.cancel_button.setEnabled(False)
+        self.create_button.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.cancel_requested = False
+        self.refresh_drive_list()
+
+    async def check_for_updates(self):
+        """Check for application updates."""
+        try:
+            has_update, version, url = await self.update_checker.check_for_updates()
+            if has_update:
+                # Use QTimer to safely update UI from async context
+                QTimer.singleShot(0, lambda: self.show_update_notification(version, url))
+        except Exception as e:
+            logging.error(f"Update check failed: {e}")
+
+    def show_update_notification(self, version, url):
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(f"New version {version} available!")
+        msg.setInformativeText(f"Download from: {url}")
+        msg.setWindowTitle("Update Available")
+        msg.exec_()
+
+    def backup_config(self):
+        """Backup current configuration."""
+        try:
+            config = self.get_current_config()
+            backup_path = self.backup_manager.create_backup(
+                self.drive_combo.currentText(),
+                config
+            )
+            self.show_notification("Backup Created", f"Backup saved to {backup_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Backup Error", str(e))
+
+    def restore_config(self):
+        """Restore configuration from backup."""
+        try:
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "Select Backup File", 
+                self.backup_manager.backup_dir,
+                "Backup Files (*.gz)"
+            )
+            if file_path:
+                config = self.backup_manager.restore_backup(file_path)
+                self.apply_config(config)
+        except Exception as e:
+            QMessageBox.critical(self, "Restore Error", str(e))
 
 # Main block to run the application
 if __name__ == "__main__":
