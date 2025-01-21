@@ -1,6 +1,6 @@
 # SmartBoot – Simplified Bootable USB Drive Creation from ISO Files
 
-**SmartBoot** is a powerful and user-friendly Python tool that simplifies creating bootable USB drives from ISO files. Whether you need a bootable USB for Windows or Linux, SmartBoot makes the process fast and efficient. This cross-platform utility provides customizable formatting options and automatically installs the appropriate bootloader for UEFI and Legacy systems. With SmartBoot, creating a bootable USB drive has never been easier.
+**SmartBoot** is a powerful and user-friendly portable Python tool that simplifies creating bootable USB drives from ISO files. Whether you need a bootable USB for Windows or Linux, SmartBoot makes the process fast and efficient. This cross-platform utility provides customizable formatting options and automatically installs the appropriate bootloader for UEFI and Legacy systems. With SmartBoot, creating a bootable USB drive has never been easier.
 
 ## Key Features of SmartBoot
 
@@ -18,28 +18,29 @@ Before you can use SmartBoot to create bootable USB drives, ensure you have the 
 - **Required Python Packages**: Install the necessary Python dependencies using the following command:
   ```bash
   pip install -r requirements.txt
+  ```
 
 ## Usage
 
 1. Clone this repository:
-https://github.com/zikani/smartboot.git
-
+   ```bash
+   git clone https://github.com/zikani/smartboot.git
+   ```
 
 2. Run the script:
-- On Windows:
-  ```
-  python main.py
-  ```
-- On Linux:
-  ```
-  python3 main.py
-  ```
+   - On Windows:
+     ```bash
+     python main.py
+     ```
+   - On Linux:
+     ```bash
+     python3 main.py
+     ```
 
 3. **Follow the Interactive Instructions**:
-
-  -  Select your ISO file.
-  -  Choose the USB drive you want to format.
-  -  Specify the file system, boot type (UEFI or Legacy BIOS), and partition scheme.
+   - Select your ISO file.
+   - Choose the USB drive you want to format.
+   - Specify the file system, boot type (UEFI or Legacy BIOS), and partition scheme.
 
 4. **Finish the Process**: Once completed, your bootable USB drive will be ready to use for installing operating systems or running live environments.
 
@@ -49,9 +50,10 @@ https://github.com/zikani/smartboot.git
 - **Error Messages**: If any errors occur during the process, SmartBoot will provide guidance on how to resolve them.
 
 ## Why Use SmartBoot for Bootable USB Drive Creation?
--  **Ease of Use**: The intuitive interface makes SmartBoot ideal for users at any technical level.
--  **Cross-Platform Functionality**: Whether you're on Windows or Linux, SmartBoot ensures seamless USB drive creation.
--  **Customizability**: You can customize the file system, partitioning, and bootloader for full control over your bootable USB.
+
+- **Ease of Use**: The intuitive interface makes SmartBoot ideal for users at any technical level.
+- **Cross-Platform Functionality**: Whether you're on Windows or Linux, SmartBoot ensures seamless USB drive creation.
+- **Customizability**: You can customize the file system, partitioning, and bootloader for full control over your bootable USB.
 
 ## Contributing
 
