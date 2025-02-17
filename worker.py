@@ -5,14 +5,15 @@ import logging
 from random import randint
 from PyQt5.QtWidgets import (QApplication, QLabel, QMainWindow, QPushButton, 
                              QVBoxLayout, QWidget, QFileDialog, QMessageBox)
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtCore import pyqtSignal, QObject
 import platform
 import ctypes
 import shutil
 from utils import verify_iso_integrity, get_drive_size
+import threading
 
 # USBWorker thread for handling USB creation
-class USBWorker(QThread):
+class USBWorker(QObject):
     # PyQt5 signals to notify progress, errors, and completion
     progress_update = pyqtSignal(int)
     error_occurred = pyqtSignal(str)
@@ -31,10 +32,11 @@ class USBWorker(QThread):
         self.is_cancelled = False
         self.total_steps = 0
         self.current_step = 0
+        self.thread = None
 
     # Set arguments for USB creation process
     def set_arguments(self, iso_list, drive_path, file_system, volume_label, 
-                      selected_device, selected_boot_type, selected_partition_scheme):
+                      selected_device, selected_boot_type, selected_partition_scheme, check_bad_blocks=False):
         self.iso_list = iso_list
         self.drive_path = drive_path
         self.file_system = file_system
@@ -42,12 +44,22 @@ class USBWorker(QThread):
         self.selected_device = selected_device
         self.selected_boot_type = selected_boot_type
         self.selected_partition_scheme = selected_partition_scheme
+        self.check_bad_blocks = check_bad_blocks
         self.total_steps = len(iso_list) * 2 + 3  # ISO verification + copying + formatting + bootloader
+        if self.check_bad_blocks:
+            self.total_steps += 1  # Additional step for bad blocks check
         self.current_step = 0
+
+    def start(self):
+        self.thread = threading.Thread(target=self.run)
+        self.thread.start()
 
     def run(self):
         try:
+            self.log_start()
             self.check_system_requirements()
+            if self.check_bad_blocks:
+                self.perform_bad_blocks_check()
             self.verify_all_isos()
             if self.is_cancelled:
                 return
@@ -59,16 +71,27 @@ class USBWorker(QThread):
             self.error_occurred.emit(str(e))
             self.cleanup_on_error()
             logging.error(f"Error during USB creation: {e}")
+        finally:
+            self.log_end()
+
+    def log_start(self):
+        """Log the start of the USB creation process."""
+        logging.info("Starting USB creation process.")
+
+    def log_end(self):
+        """Log the end of the USB creation process."""
+        logging.info("USB creation process ended.")
 
     def verify_all_isos(self):
         """Verify integrity of all ISO files before proceeding."""
-        for iso in self.iso_list:
+        for index, iso in enumerate(self.iso_list):
             if self.is_cancelled:
                 return
             self.status_update.emit(f"Verifying ISO: {os.path.basename(iso)}")
             if not verify_iso_integrity(iso):
                 raise ValueError(f"ISO verification failed for {iso}")
             self.update_progress()
+            self.progress_update.emit(int(((index + 1) / len(self.iso_list)) * 100))
 
     # Check system requirements
     def check_system_requirements(self):
@@ -220,7 +243,7 @@ class USBWorker(QThread):
             if platform.system() == "Windows":
                 # Use PowerShell to mount and copy
                 mount_point = f"{chr(randint(68, 90))}:"  # Random drive letter D-Z
-                ps_cmd = f"""
+                ps_cmd = r"""
                 Mount-DiskImage -ImagePath "{iso_path}"
                 $vol = Get-Volume | Where-Object {{ $_.DriveType -eq 'CD-ROM' }}
                 Copy-Item "$($vol.DriveLetter):\*" "{self.drive_path}" -Recurse -Force
@@ -319,10 +342,14 @@ class USBWorker(QThread):
         selected_disk = self.get_selected_disk_windows(c)
         if not selected_disk:
             raise ValueError("Disk not found.")
-        selected_disk.FormatFileSystem(Format=self.file_system, QuickFormat=True, VolumeName=self.volume_label)
+        
+        if self.file_system.lower() in ["fat", "fat32", "ntfs", "exfat", "refs"]:
+            selected_disk.FormatFileSystem(Format=self.file_system, QuickFormat=True, VolumeName=self.volume_label)
+        else:
+            raise ValueError(f"Unsupported file system: {self.file_system}")
 
     def format_on_linux(self):
-        supported_filesystems = ["vfat", "ntfs", "ext2", "ext3", "ext4"]
+        supported_filesystems = ["vfat", "ntfs", "ext2", "ext3", "ext4", "udf", "exfat"]
         if self.file_system.lower() not in supported_filesystems:
             raise ValueError(f"Unsupported file system: {self.file_system}")
         subprocess.run(["mkfs." + self.file_system, "-n", self.volume_label, self.drive_path], check=True)
@@ -387,6 +414,22 @@ class USBWorker(QThread):
         self.current_step += 1
         progress = (self.current_step / self.total_steps) * 100
         self.progress_update.emit(int(progress))
+
+    def perform_bad_blocks_check(self):
+        """Perform a bad blocks check on the drive."""
+        self.status_update.emit("Checking for bad blocks...")
+        try:
+            if platform.system() == "Windows":
+                # Use chkdsk for Windows
+                cmd = f'chkdsk {self.drive_path} /r'
+                subprocess.run(cmd, shell=True, check=True)
+            else:
+                # Use badblocks for Linux
+                cmd = f'badblocks -v {self.drive_path}'
+                subprocess.run(cmd, shell=True, check=True)
+            self.update_progress()
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Bad blocks check failed: {str(e)}")
 
 
 # MainWindow class for handling the UI and interactions

@@ -1,3 +1,4 @@
+import json
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, 
                              QVBoxLayout, QFileDialog, QMessageBox, 
                              QProgressBar, QComboBox, QSystemTrayIcon, 
@@ -10,8 +11,8 @@ import ctypes
 import logging
 from config import UI_CONFIG, SUPPORTED_FILESYSTEMS, SUPPORTED_BOOTLOADERS, SUPPORTED_PARTITION_SCHEMES
 from utils import get_removable_drives, verify_iso_integrity, get_drive_space_info, is_windows_bootable_image
-from features.update_checker import UpdateChecker
-from features.backup_manager import BackupManager
+from update_checker import UpdateChecker  # Fixed import path
+from backup_manager import BackupManager
 import asyncio
 
 class SmartBootUI(QWidget):
@@ -40,10 +41,8 @@ class SmartBootUI(QWidget):
 
     def init_async(self):
         """Initialize async operations."""
-        loop = asyncio.get_event_loop()
-        if not loop.is_running():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         loop.create_task(self.check_for_updates())
 
     def setup_worker_connections(self):
@@ -52,6 +51,9 @@ class SmartBootUI(QWidget):
         self.worker.usb_creation_completed.connect(self.handle_worker_finished)
         self.worker.error_occurred.connect(self.handle_worker_error)
         self.worker.status_update.connect(self.handle_worker_status)
+
+    def update_progress_bar(self, value):
+        self.progress_bar.setValue(value)
 
     def handle_worker_error(self, error_message):
         """Handle worker errors."""
@@ -107,6 +109,10 @@ class SmartBootUI(QWidget):
         self.auto_determine_checkbox = QCheckBox("Auto Determine Settings")
         self.auto_determine_checkbox.stateChanged.connect(self.toggle_advanced_options)
         layout.addWidget(self.auto_determine_checkbox)
+
+        # Checkbox for Bad Blocks Check
+        self.bad_blocks_checkbox = QCheckBox("Perform Bad Blocks Check")
+        layout.addWidget(self.bad_blocks_checkbox)
 
         # Add a group box for Partition Scheme and Bootloader Type
         self.create_options_group(layout)
@@ -230,6 +236,12 @@ class SmartBootUI(QWidget):
         options_layout.addWidget(QLabel("Bootloader Type:"))
         options_layout.addWidget(self.bootloader_combo)
 
+        # File System Type
+        self.filesystem_combo = QComboBox()
+        self.filesystem_combo.addItems(SUPPORTED_FILESYSTEMS)
+        options_layout.addWidget(QLabel("File System:"))
+        options_layout.addWidget(self.filesystem_combo)
+
         options_group.setLayout(options_layout)
         layout.addWidget(options_group)
 
@@ -273,7 +285,7 @@ class SmartBootUI(QWidget):
             QMessageBox.warning(self, "Invalid File", "Please drop an ISO file.")
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
+        if (event.mimeData().hasUrls()):
             event.accept()
         else:
             event.ignore()
@@ -332,6 +344,7 @@ class SmartBootUI(QWidget):
             # Update UI to reflect Windows settings
             self.bootloader_combo.setCurrentText("UEFI")
             self.partition_combo.setCurrentText("GPT")
+            self.filesystem_combo.setCurrentText("NTFS")
         else:
             # ...existing Linux settings...
             self.selected_boot_type = self.bootloader_combo.currentText()  # Use user-selected bootloader type
@@ -340,6 +353,7 @@ class SmartBootUI(QWidget):
             else:
                 self.file_system = "FAT32"  # Use FAT32 for compatibility with older systems
             self.selected_partition_scheme = self.partition_combo.currentText()  # Use user-selected partition scheme
+            self.filesystem_combo.setCurrentText(self.file_system)
 
     def create_preview_message(self):
         """Create a preview message for the confirmation dialog."""
@@ -357,6 +371,7 @@ class SmartBootUI(QWidget):
             # If not auto determining, ensure to use user-selected values
             self.selected_boot_type = self.bootloader_combo.currentText()
             self.selected_partition_scheme = self.partition_combo.currentText()
+            self.file_system = self.filesystem_combo.currentText()
 
         # Check if selected_boot_type and selected_partition_scheme have been assigned
         if not self.selected_boot_type or not self.selected_partition_scheme:
@@ -371,7 +386,8 @@ class SmartBootUI(QWidget):
             "BOOTABLE",  # Example volume label
             "sdb",        # Example selected device; consider making this dynamic
             self.selected_boot_type,
-            self.selected_partition_scheme
+            self.selected_partition_scheme,
+            check_bad_blocks=self.bad_blocks_checkbox.isChecked()
         )
                 
         self.worker.start()
@@ -452,10 +468,43 @@ class SmartBootUI(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Restore Error", str(e))
 
-# Main block to run the application
-if __name__ == "__main__":
-    import sys
-    app = QApplication(sys.argv)
-    window = SmartBootUI()
-    window.show()
-    sys.exit(app.exec_())
+    def apply_config(self, config):
+        """Apply configuration settings from backup."""
+        # Apply the configuration settings to the UI and other components
+        pass
+
+    def get_current_config(self):
+        """Get current configuration settings."""
+        # Retrieve current settings from the UI and other components
+        return {}
+
+    def load_settings(self):
+        """Load application settings."""
+        try:
+            with open('settings.json', 'r') as f:
+                settings = json.load(f)
+                # Apply settings to the application
+                self.apply_settings(settings)
+        except Exception as e:
+            logging.error(f"Failed to load settings: {e}")
+
+    def save_settings(self):
+        """Save application settings."""
+        try:
+            settings = self.get_current_settings()
+            with open('settings.json', 'w') as f:
+                json.dump(settings, f)
+        except Exception as e:
+            logging.error(f"Failed to save settings: {e}")
+
+    def apply_settings(self, settings):
+        """Apply settings to the application."""
+        # Apply settings to the UI and other components
+        pass
+
+    def get_current_settings(self):
+        """Get current application settings."""
+        # Retrieve current settings from the UI and other components
+        return {}
+
+
