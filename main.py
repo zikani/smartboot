@@ -1,33 +1,25 @@
 import sys
-import logging
 from PyQt5.QtWidgets import QApplication
-from smartboot import SmartBootUI
+from gui.main_window import MainWindow
+import os
 
-VERSION = "1.0.0"
+# Add the project root directory to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-def configure_logging() -> None:
-    """Configure logging settings."""
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+def main():
+    """
+    Main entry point for the application.
+    Initializes the GUI and starts the event loop.
+    """
+    app = QApplication(sys.argv)
+    app.setApplicationName("SmartBoot")
+    app.setApplicationVersion("0.1.0")
+    
+    window = MainWindow()
+    window.show()
+    
+    sys.exit(app.exec_())
 
-def handle_shutdown():
-    """Handle application shutdown."""
-    logging.info("Application is shutting down.")
-
-def main() -> None:
-    """Main entry point for the application."""
-    configure_logging()
-    try:
-        app = QApplication(sys.argv)
-        window = SmartBootUI()
-        window.setWindowTitle(f"Smart Boot - Version {VERSION}")
-        window.show()
-        logging.info("Application started successfully.")
-        app.aboutToQuit.connect(handle_shutdown)
-        sys.exit(app.exec_())
-    except Exception as e:
-        logging.error(f"An error occurred: {e}", exc_info=True)
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-    
