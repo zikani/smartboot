@@ -388,7 +388,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(0)
             
             # Step 1: Format the USB drive
-            from smartboot.core.disk_formatter import DiskFormatter
+            from core.disk_formatter import DiskFormatter
             formatter = DiskFormatter()
             
             self.status_label.setText("Formatting USB drive...")
@@ -413,7 +413,7 @@ class MainWindow(QMainWindow):
             # Step 2: Write ISO to USB
             if direct_write:
                 # Direct write using dd-like operation
-                from smartboot.core.image_writer import ImageWriter
+                from core.image_writer import ImageWriter
                 writer = ImageWriter()
                 
                 self.status_label.setText("Writing ISO directly to USB...")
@@ -435,7 +435,7 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("Writing ISO to USB...")
                 
                 # Step 2a: Write ISO files
-                from smartboot.core.image_writer import ImageWriter
+                from core.image_writer import ImageWriter
                 writer = ImageWriter()
                 
                 success_iso = writer.write_iso(
