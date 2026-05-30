@@ -35,7 +35,6 @@ class USBManager:
             if self.system == "Windows":
                 devices = self._get_windows_devices()
                 if not devices:
-                    # Fallback: try WMI via wmic
                     try:
                         import subprocess
                         result = subprocess.run([
@@ -68,7 +67,7 @@ class USBManager:
                 return devices
             elif self.system == "Linux":
                 return self._get_linux_devices()
-            elif self.system == "Darwin":  # macOS
+            elif self.system == "Darwin":
                 return self._get_macos_devices()
             else:
                 return [{
@@ -97,7 +96,6 @@ class USBManager:
             List[Dict[str, Any]]: List of dictionaries containing device information
         """
         try:
-            # Using PowerShell to get disk information
             cmd = [
                 "powershell",
                 "-Command",
@@ -125,13 +123,11 @@ class USBManager:
             import json
             devices_json = json.loads(result.stdout)
             
-            # Handle case when only one device is returned (not in a list)
             if isinstance(devices_json, dict):
                 devices_json = [devices_json]
             
             devices = []
             for device in devices_json:
-                # Format the device information
                 device_info = {
                     'name': device.get('Name', 'Unknown Device'),
                     'number': device.get('Number', -1),
@@ -159,7 +155,6 @@ class USBManager:
             List[Dict[str, Any]]: List of dictionaries containing device information
         """
         try:
-            # Try using lsblk command to get removable devices
             result = subprocess.run(
                 ["lsblk", "-o", "NAME,SIZE,FSTYPE,MOUNTPOINT,VENDOR,MODEL,TRAN", "-J"],
                 capture_output=True, text=True, timeout=5
@@ -172,11 +167,10 @@ class USBManager:
                 if 'blockdevices' in devices_data:
                     devices = []
                     for device in devices_data['blockdevices']:
-                        # Only include USB devices (tran=usb) that are not partitions
                         if device.get('tran') == 'usb' and not device['name'].startswith('loop'):
                             device_info = {
                                 'name': f"{device.get('vendor', '')} {device.get('model', '')}".strip() or device['name'],
-                                'number': -1,  # Linux doesn't use disk numbers like Windows
+                                'number': -1,
                                 'size': device.get('size', 'Unknown'),
                                 'filesystem': device.get('fstype', 'Unknown'),
                                 'drive_letter': device.get('mountpoint', '')
@@ -186,7 +180,6 @@ class USBManager:
                     if devices:
                         return devices
             
-            # Fallback: Try using a simpler lsblk command
             try:
                 result = subprocess.run(
                     ["lsblk", "-d", "-o", "NAME,SIZE,FSTYPE,MOUNTPOINT"],
@@ -194,13 +187,12 @@ class USBManager:
                 )
                 
                 if result.returncode == 0:
-                    lines = result.stdout.strip().split('\n')[1:]  # Skip header
+                    lines = result.stdout.strip().split('\n')[1:]
                     devices = []
                     
                     for line in lines:
                         parts = line.split()
                         if len(parts) >= 2 and not parts[0].startswith('loop'):
-                            # Check if it's likely removable (sdb, sdc, etc. but not sda which is usually the system disk)
                             if parts[0].startswith('sd') and not parts[0] == 'sda':
                                 device_info = {
                                     'name': parts[0],
@@ -216,17 +208,15 @@ class USBManager:
             except Exception:
                 pass
                 
-            # Second fallback: Check /dev/disk/by-id for USB devices
             try:
                 if os.path.exists('/dev/disk/by-id'):
                     usb_devices = []
                     for device in os.listdir('/dev/disk/by-id'):
                         if 'usb' in device and not 'part' in device:
-                            # This is likely a USB drive
                             usb_devices.append({
                                 'name': device.replace('usb-', '').replace('_', ' '),
                                 'number': -1,
-                                'size': 'Unknown',  # We don't have size info in this fallback
+                                'size': 'Unknown',
                                 'filesystem': 'Unknown',
                                 'drive_letter': ''
                             })
@@ -235,7 +225,6 @@ class USBManager:
             except Exception:
                 pass
                 
-            # If all methods fail, return a message
             return [{
                 'name': 'No USB devices found or insufficient permissions',
                 'number': -1,
@@ -246,7 +235,6 @@ class USBManager:
             }]
             
         except Exception as e:
-            # Return a safe fallback with error info
             return [{
                 'name': f'Error detecting USB devices: {str(e)}',
                 'number': -1,
@@ -264,26 +252,22 @@ class USBManager:
             List[Dict[str, Any]]: List of dictionaries containing device information
         """
         try:
-            # Try using diskutil to list all external disks
             result = subprocess.run(
                 ["diskutil", "list", "external", "-plist"],
                 capture_output=True, text=True, timeout=5
             )
             
             if result.returncode == 0 and result.stdout.strip():
-                # Parse plist output
                 try:
                     import plistlib
                     from io import BytesIO
                     
-                    # Convert text to bytes for plistlib
                     plist_data = plistlib.load(BytesIO(result.stdout.encode('utf-8')))
                     
                     if 'AllDisksAndPartitions' in plist_data:
                         devices = []
                         
                         for disk in plist_data['AllDisksAndPartitions']:
-                            # Get more info about this disk
                             info_result = subprocess.run(
                                 ["diskutil", "info", "-plist", disk['DeviceIdentifier']],
                                 capture_output=True, text=True, timeout=5
@@ -292,11 +276,10 @@ class USBManager:
                             if info_result.returncode == 0 and info_result.stdout.strip():
                                 disk_info = plistlib.load(BytesIO(info_result.stdout.encode('utf-8')))
                                 
-                                # Only include removable media
                                 if disk_info.get('Removable', False) or disk_info.get('RemovableMedia', False):
                                     device_info = {
                                         'name': disk_info.get('MediaName', disk['DeviceIdentifier']),
-                                        'number': -1,  # macOS doesn't use disk numbers like Windows
+                                        'number': -1,
                                         'size': f"{disk_info.get('TotalSize', 0) / (1024*1024*1024):.2f} GB",
                                         'filesystem': disk_info.get('FilesystemName', 'Unknown'),
                                         'drive_letter': disk_info.get('MountPoint', '')
@@ -306,13 +289,10 @@ class USBManager:
                         if devices:
                             return devices
                 except ImportError:
-                    # If plistlib is not available, try the fallback method
                     pass
                 except Exception as e:
-                    # If parsing fails, try the fallback method
                     pass
             
-            # Fallback: Use diskutil list in text format
             try:
                 result = subprocess.run(
                     ["diskutil", "list", "external"],
@@ -326,11 +306,9 @@ class USBManager:
                     
                     for line in lines:
                         if line.startswith("/dev/"):
-                            # This is a disk identifier line
                             parts = line.split()
                             current_disk = parts[0]
                             
-                            # Get disk info
                             info_result = subprocess.run(
                                 ["diskutil", "info", current_disk],
                                 capture_output=True, text=True, timeout=5
@@ -339,7 +317,6 @@ class USBManager:
                             if info_result.returncode == 0:
                                 info_text = info_result.stdout
                                 
-                                # Extract relevant information
                                 device_name = current_disk
                                 device_size = "Unknown"
                                 filesystem = "Unknown"
@@ -373,16 +350,13 @@ class USBManager:
             except Exception:
                 pass
                 
-            # Second fallback: Check /Volumes for mounted external drives
             try:
                 if os.path.exists('/Volumes'):
-                    # Get mounted volumes that aren't the system volume
                     volumes = [vol for vol in os.listdir('/Volumes') if vol != 'Macintosh HD']
                     
                     if volumes:
                         devices = []
                         for volume in volumes:
-                            # Try to get disk info
                             try:
                                 stat_info = os.statvfs(f"/Volumes/{volume}")
                                 size_bytes = stat_info.f_frsize * stat_info.f_blocks
@@ -392,11 +366,10 @@ class USBManager:
                                     'name': volume,
                                     'number': -1,
                                     'size': f"{size_gb:.2f} GB",
-                                    'filesystem': 'Unknown',  # We don't have this info in this fallback
+                                    'filesystem': 'Unknown',
                                     'drive_letter': f"/Volumes/{volume}"
                                 })
                             except:
-                                # If we can't get stats, still include the volume
                                 devices.append({
                                     'name': volume,
                                     'number': -1,
@@ -410,7 +383,6 @@ class USBManager:
             except Exception:
                 pass
             
-            # If all methods fail, return a message
             return [{
                 'name': 'No USB devices found or insufficient permissions',
                 'number': -1,
@@ -421,7 +393,6 @@ class USBManager:
             }]
             
         except Exception as e:
-            # Return a safe fallback with error info
             return [{
                 'name': f'Error detecting USB devices: {str(e)}',
                 'number': -1,

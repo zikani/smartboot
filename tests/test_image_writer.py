@@ -9,7 +9,6 @@ class TestImageWriter(unittest.TestCase):
         self.assertIsInstance(self.writer, ImageWriter)
 
     def test_detect_iso_type_filename(self):
-        # Should detect 'windows' from filename
         result = self.writer._detect_iso_type('Windows10.iso')
         self.assertEqual(result, 'windows')
         result = self.writer._detect_iso_type('ubuntu-22.04.iso')
@@ -18,7 +17,6 @@ class TestImageWriter(unittest.TestCase):
         self.assertEqual(result, 'freedos')
 
     def test_write_iso_file_not_found(self):
-        # Should fail gracefully if ISO file does not exist
         success = self.writer.write_iso('nonexistent.iso', 'Z:')
         self.assertFalse(success)
 

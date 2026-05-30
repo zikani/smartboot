@@ -14,7 +14,6 @@ class TestDiskFormatter(unittest.TestCase):
         self.assertTrue(len(fs) > 0)
 
     def test_format_disk_invalid_device(self):
-        # Should fail gracefully with invalid device
         result, msg = self.formatter.format_disk(device={}, filesystem='ntfs')
         self.assertFalse(result)
         self.assertIsInstance(msg, str)

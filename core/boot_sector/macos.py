@@ -29,10 +29,9 @@ class MacOSBootSector(BaseBootSector):
             bool: True if has root privileges, False otherwise
         """
         try:
-            # Try to run a command that requires root
             return subprocess.run(['sudo', '-n', 'true'], check=False, capture_output=True).returncode == 0
         except Exception:
-            return False  # Assume no privileges if check fails
+            return False
     
     def _get_device_partition(self, device: Dict[str, Any], number: int = 1) -> Optional[str]:
         """
@@ -45,7 +44,7 @@ class MacOSBootSector(BaseBootSector):
         Returns:
             Optional[str]: Partition path or None if not found
         """
-        path = device.get('name')  # e.g., disk2
+        path = device.get('name')
         if not path:
             return None
         
@@ -54,10 +53,9 @@ class MacOSBootSector(BaseBootSector):
         else:
             dev = path
             
-        # Try different naming schemes for macOS partitions
         partition_formats = [
-            f"{dev}s{number}",  # Common format for macOS
-            f"{dev}{number}"    # Alternative format
+            f"{dev}s{number}",
+            f"{dev}{number}"
         ]
         
         for partition in partition_formats:
@@ -85,8 +83,7 @@ class MacOSBootSector(BaseBootSector):
         """
         self._update(progress_callback, 10, 'Writing BIOS boot sector on macOS...')
         
-        # macOS has very limited support for BIOS boot sectors
-        path = device.get('name')  # e.g., disk2
+        path = device.get('name')
         if not path:
             self._update(progress_callback, 0, 'Device name not found for boot sector')
             return False
@@ -96,25 +93,19 @@ class MacOSBootSector(BaseBootSector):
         else:
             dev = path
         
-        # Try to find a partition
         partition = self._get_device_partition(device)
         if not partition:
-            # Try alternative naming scheme on macOS
             if os.path.exists(f"{dev}s1"):
                 partition = f"{dev}s1"
         
-        # Try to use dd to write generic MBR
         try:
             self._update(progress_callback, 50, 'Writing generic MBR with dd...')
             
-            # Find or create MBR
             mbr_bin = self._find_or_create_mbr()
             
             if mbr_bin and os.path.exists(mbr_bin):
-                # Make sure device is not mounted
                 subprocess.run(['sudo', 'diskutil', 'unmountDisk', dev], check=False, capture_output=True)
                 
-                # Write MBR
                 subprocess.run(['sudo', 'dd', f'if={mbr_bin}', f'of={dev}', 'bs=446', 'count=1', 'conv=notrunc'], 
                              check=True, capture_output=True)
                 
@@ -142,12 +133,11 @@ class MacOSBootSector(BaseBootSector):
             bool: True if successful, False otherwise
         """
         try:
-            # Check for admin rights first
             if not self.check_admin_privileges():
                 self._update(progress_callback, 0, "Error: Root privileges required for writing UEFI boot files")
                 return False
 
-            path = device.get('name')  # e.g., disk2
+            path = device.get('name')
             if not path:
                 self._update(progress_callback, 0, 'Device name not found for UEFI boot')
                 return False
@@ -159,13 +149,11 @@ class MacOSBootSector(BaseBootSector):
             
             self._update(progress_callback, 10, 'Preparing UEFI boot files...')
             
-            # Find the partition
             partition = self._get_device_partition(device)
             if not partition:
                 self._update(progress_callback, 0, f"Could not find partition on {dev}")
                 return False
             
-            # Get mount point
             mount_info = subprocess.run(['diskutil', 'info', partition], 
                                      capture_output=True, text=True, check=False).stdout
             
@@ -176,13 +164,11 @@ class MacOSBootSector(BaseBootSector):
                     break
             
             if not mount_point or not os.path.exists(mount_point):
-                # Try to mount it
                 try:
                     self._update(progress_callback, 20, f'Mounting {partition}...')
                     mount_result = subprocess.run(['diskutil', 'mount', partition], 
                                                capture_output=True, text=True, check=True).stdout
                     
-                    # Extract mount point from result
                     for line in mount_result.splitlines():
                         if 'on' in line and partition in line:
                             parts = line.split('on')
@@ -197,18 +183,15 @@ class MacOSBootSector(BaseBootSector):
                 self._update(progress_callback, 0, f"Could not find or create mount point for {partition}")
                 return False
             
-            # Create EFI directory structure
             efi_boot_dir = os.path.join(mount_point, 'EFI', 'BOOT')
             os.makedirs(efi_boot_dir, exist_ok=True)
             
             self._update(progress_callback, 30, 'Created EFI directory structure')
             
-            # Try to find a suitable EFI bootloader
             bootx64_path = os.path.join(efi_boot_dir, 'BOOTX64.EFI')
             
-            # Check common macOS locations for EFI bootloaders
             efi_sources = [
-                '/usr/standalone/i386/apfs.efi',  # macOS APFS bootloader
+                '/usr/standalone/i386/apfs.efi',
                 '/usr/standalone/i386/EfiLoginUI.efi',
                 '/System/Library/CoreServices/boot.efi',
                 '/usr/share/syslinux/efi64/syslinux.efi'
@@ -225,7 +208,6 @@ class MacOSBootSector(BaseBootSector):
                         logger.error(f"Failed to copy bootloader from {src}: {str(e)}")
                         continue
             
-            # If we can't find a suitable bootloader, inform the user
             self._update(progress_callback, 0, "Could not find suitable UEFI bootloader on macOS")
             return False
             
@@ -251,8 +233,5 @@ class MacOSBootSector(BaseBootSector):
         Returns:
             bool: True if successful, False otherwise
         """
-        # FreeDOS boot on macOS is basically the same as BIOS boot
-        # macOS has very limited support for this
         
-        # Just use the standard BIOS boot method for macOS
         return self.write_bios_boot(device, options, progress_callback)

@@ -28,11 +28,9 @@ class BootSectorManager:
     def __init__(self):
         """Initialize the Boot Sector Manager."""
         self.system = platform.system()
-        # Track downloaded/extracted resources
         self.resource_dir = os.path.join(tempfile.gettempdir(), "smartboot_resources")
         os.makedirs(self.resource_dir, exist_ok=True)
         
-        # Create platform-specific implementation
         if self.system == 'Windows':
             self._impl = WindowsBootSector(self.resource_dir)
         elif self.system == 'Linux':
@@ -40,7 +38,6 @@ class BootSectorManager:
         elif self.system == 'Darwin':
             self._impl = MacOSBootSector(self.resource_dir)
         else:
-            # Fallback to base implementation which will report unsupported operations
             self._impl = BaseBootSector(self.resource_dir)
             
         logger.debug(f"BootSectorManager: Initialized for {self.system}")
@@ -67,31 +64,27 @@ class BootSectorManager:
                 self._update(progress_callback, 0, f"Error: {device['error']}")
                 return False
             
-            # Check for admin/root privileges first
             if not self._impl.check_admin_privileges():
                 self._update(progress_callback, 0, "Error: Administrator/root privileges required. Please run SmartBoot with elevated privileges.")
                 return False
             
-            # Get boot type from options
             boot_type = options.get('boot_type', 'bios').lower()
             
             self._update(progress_callback, 5, f"Preparing to write {boot_type} boot sector...")
             
-            # Choose the appropriate boot sector method
             if boot_type == 'freedos':
                 return self._impl.write_freedos_boot(device, options, progress_callback)
             elif boot_type == 'uefi':
                 return self._impl.write_uefi_boot(device, options, progress_callback)
             elif boot_type == 'dual':
-                # Write both BIOS and UEFI boot sectors
                 bios_success = self._impl.write_bios_boot(device, options, progress_callback)
                 if not bios_success:
                     self._update(progress_callback, 50, "Warning: BIOS boot sector failed, trying UEFI...")
                 uefi_success = self._impl.write_uefi_boot(device, options, progress_callback)
                 if not uefi_success:
                     self._update(progress_callback, 75, "Warning: UEFI boot sector failed")
-                return bios_success or uefi_success  # As long as one works, we consider it a success
-            else:  # Default to BIOS
+                return bios_success or uefi_success
+            else:
                 return self._impl.write_bios_boot(device, options, progress_callback)
         except Exception as e:
             logger.error(f"Error writing boot sector: {str(e)}")

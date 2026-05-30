@@ -146,3 +146,5 @@ $RECYCLE.BIN/
 *.iso
 temp/
 output/
+remove_comments.py
+generate_icon.py

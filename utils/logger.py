@@ -27,17 +27,14 @@ class Logger:
         self.logger = logging.getLogger(name)
         self.logger.setLevel(log_level)
         
-        # Create formatter
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
         
-        # Create console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
         
-        # Create file handler
         log_dir = self._get_log_directory()
         os.makedirs(log_dir, exist_ok=True)
         
@@ -48,7 +45,6 @@ class Logger:
         file_handler.setLevel(log_level)
         file_handler.setFormatter(formatter)
         
-        # Add handlers to logger
         self.logger.addHandler(console_handler)
         self.logger.addHandler(file_handler)
         
@@ -68,7 +64,7 @@ class Logger:
             return os.path.join(os.environ.get("APPDATA", ""), "SmartBoot", "logs")
         elif system == "Linux":
             return os.path.join(os.path.expanduser("~"), ".smartboot", "logs")
-        elif system == "Darwin":  # macOS
+        elif system == "Darwin":
             return os.path.join(os.path.expanduser("~"), "Library", "Logs", "SmartBoot")
         else:
             return os.path.join(os.path.expanduser("~"), "smartboot_logs")
@@ -83,7 +79,6 @@ class Logger:
         return self.logger
 
 
-# Create a default logger instance
 default_logger = Logger().get_logger()
 
 

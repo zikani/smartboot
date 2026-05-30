@@ -25,7 +25,7 @@ class ImageWriter:
         logger.debug("ImageWriter: Initializing Image Writer.")
         self.system = platform.system()
         logger.debug(f"ImageWriter: Detected platform system: {self.system}")
-        self._temp_dirs = []  # Track temp dirs for cleanup
+        self._temp_dirs = []
     
     def __del__(self):
         """Clean up temporary directories on deletion."""
@@ -63,13 +63,11 @@ class ImageWriter:
                 self._update_progress(progress_callback, 0, f"Error: ISO file not found: {iso_path}")
                 return False
             
-            # Auto-detect ISO type if not specified
             if iso_type == "auto":
                 logger.debug("ImageWriter: Auto-detecting ISO type.")
                 iso_type = self._detect_iso_type(iso_path, progress_callback)
                 self._update_progress(progress_callback, 10, f"Detected ISO type: {iso_type}")
             
-            # Format target drive path for the current OS
             if self.system == "Windows":
                 if len(target_drive) == 1:
                     target_drive = f"{target_drive}:\\"
@@ -81,7 +79,6 @@ class ImageWriter:
                     self._update_progress(progress_callback, 0, f"Error: Target drive not found: {target_drive}")
                     return False
             
-            # Choose the appropriate method based on ISO type and extraction preference
             if not extract_files:
                 logger.debug("ImageWriter: Performing direct image write (dd-like mode).")
                 return self._write_image_direct(iso_path, target_drive, progress_callback)
@@ -124,13 +121,11 @@ class ImageWriter:
                 self._update_progress(progress_callback, 0, f"Error: Image file not found: {image_path}")
                 return False
             
-            # Determine if the image is compressed
             is_compressed = any(image_path.lower().endswith(ext) for ext in ['.gz', '.xz', '.bz2', '.zip'])
             
-            # Direct write based on platform
             if self.system == "Windows":
                 return self._write_image_windows(image_path, target_device, is_compressed, progress_callback)
-            else:  # Linux/macOS
+            else:
                 return self._write_image_unix(image_path, target_device, is_compressed, progress_callback)
         except Exception as e:
             self._update_progress(progress_callback, 0, f"Error writing disk image: {str(e)}")
@@ -153,26 +148,20 @@ class ImageWriter:
         """
         self._update_progress(progress_callback, 5, "Detecting ISO type...")
         
-        # First check the filename for common patterns
         filename = os.path.basename(iso_path).lower()
         
-        # Windows detection
         if any(win_term in filename for win_term in ['windows', 'win', 'microsoft', 'server']):
             return "windows"
         
-        # Linux distribution detection
         linux_distros = ['ubuntu', 'debian', 'fedora', 'centos', 'rhel', 'suse', 'arch', 'manjaro', 'linux', 'mint']
         if any(distro in filename for distro in linux_distros):
             return "linux"
         
-        # DOS detection
         if any(dos_term in filename for dos_term in ['freedos', 'msdos', 'dos']):
             return "freedos"
         
-        # Try to mount and check content (Windows only)
         if self.system == "Windows":
             try:
-                # Use PowerShell to mount and check ISO contents
                 mount_cmd = [
                     "powershell",
                     "-Command",
@@ -182,23 +171,19 @@ class ImageWriter:
                 drive_letter = result.stdout.strip() + ":\\"
                 
                 try:
-                    # Check for Windows markers
                     if os.path.exists(os.path.join(drive_letter, "sources", "install.wim")) or \
                        os.path.exists(os.path.join(drive_letter, "sources", "install.esd")):
                         return "windows"
                     
-                    # Check for Linux markers
                     if os.path.exists(os.path.join(drive_letter, "casper")) or \
                        os.path.exists(os.path.join(drive_letter, "isolinux")) or \
                        os.path.exists(os.path.join(drive_letter, "live")):
                         return "linux"
                     
-                    # Check for DOS markers
                     if os.path.exists(os.path.join(drive_letter, "kernel.sys")) or \
                        os.path.exists(os.path.join(drive_letter, "command.com")):
                         return "freedos"
                 finally:
-                    # Always unmount the ISO
                     unmount_cmd = [
                         "powershell",
                         "-Command",
@@ -206,10 +191,8 @@ class ImageWriter:
                     ]
                     subprocess.run(unmount_cmd, capture_output=True, timeout=5)
             except Exception:
-                # If mounting fails, continue with other detection methods
                 pass
         
-        # Fallback to generic
         return "generic"
     
     def _write_windows_iso(
@@ -231,7 +214,6 @@ class ImageWriter:
         """
         self._update_progress(progress_callback, 15, "Preparing to write Windows ISO...")
         
-        # Mount the ISO
         try:
             mount_cmd = [
                 "powershell",
@@ -248,38 +230,32 @@ class ImageWriter:
             self._update_progress(progress_callback, 20, f"ISO mounted at {iso_drive}")
             
             try:
-                # Copy all files from ISO to USB
                 self._update_progress(progress_callback, 25, "Copying Windows files to USB...")
                 
-                # Use robocopy for efficient copying
                 robocopy_cmd = [
                     "robocopy",
                     iso_drive,
                     target_drive,
-                    "/E",     # Copy subdirectories, including empty ones
-                    "/NFL",   # No file list - don't log file names
-                    "/NDL",   # No directory list - don't log directory names
-                    "/NJH",   # No job header
-                    "/NJS",   # No job summary
-                    "/NC",    # No class - don't log file classes
-                    "/NS",    # No size - don't log file sizes
-                    "/MT:4"   # Multi-threaded, 4 threads
+                    "/E",
+                    "/NFL",
+                    "/NDL",
+                    "/NJH",
+                    "/NJS",
+                    "/NC",
+                    "/NS",
+                    "/MT:4"
                 ]
                 
-                # Robocopy returns non-zero exit codes even on success
                 subprocess.run(robocopy_cmd, capture_output=True)
                 
                 self._update_progress(progress_callback, 80, "Files copied successfully")
                 
-                # Make the USB bootable using bootsect.exe
                 self._update_progress(progress_callback, 85, "Making USB bootable...")
                 
-                # Try to find bootsect.exe in the ISO
                 bootsect_paths = [
                     os.path.join(iso_drive, "boot", "bootsect.exe"),
                     os.path.join(iso_drive, "sources", "bootsect.exe")
                 ]
-                # Fallbacks: environment variable and hardcoded path
                 env_bootsect = os.environ.get("BOOTSECT_PATH")
                 if env_bootsect:
                     bootsect_paths.append(env_bootsect)
@@ -292,7 +268,6 @@ class ImageWriter:
                         break
                 
                 if bootsect_exe:
-                    # Run bootsect.exe to make the USB bootable
                     bootsect_cmd = [
                         bootsect_exe,
                         "/nt60",
@@ -311,7 +286,6 @@ class ImageWriter:
                 self._update_progress(progress_callback, 100, "Windows ISO written successfully")
                 return True
             finally:
-                # Always unmount the ISO
                 unmount_cmd = [
                     "powershell",
                     "-Command",
@@ -342,14 +316,10 @@ class ImageWriter:
         self._update_progress(progress_callback, 15, "Preparing to write Linux ISO...")
         
         if self.system == "Windows":
-            # On Windows, we can either extract the ISO or use a direct write
-            # Direct write is more reliable for Linux ISOs
             return self._write_image_direct(iso_path, target_drive, progress_callback)
         else:
-            # On Linux/macOS, use dd for direct write
             device_path = target_drive
             if os.path.isdir(target_drive):
-                # If it's a mount point, we need to find the device
                 try:
                     mount_info = subprocess.run(["mount"], capture_output=True, text=True)
                     for line in mount_info.stdout.splitlines():
@@ -381,21 +351,17 @@ class ImageWriter:
         """
         self._update_progress(progress_callback, 15, "Preparing to write DOS ISO...")
         
-        # Extract the ISO
         temp_dir = tempfile.mkdtemp(prefix="smartboot_dos_")
         self._temp_dirs.append(temp_dir)
         
         try:
-            # Extract ISO to temp directory
             self._update_progress(progress_callback, 20, "Extracting DOS ISO...")
             
             if self.system == "Windows":
-                # Use 7-Zip or PowerShell to extract
                 if shutil.which("7z"):
                     extract_cmd = ["7z", "x", f"-o{temp_dir}", iso_path]
                     subprocess.run(extract_cmd, check=True, capture_output=True)
                 else:
-                    # Mount and copy
                     mount_cmd = [
                         "powershell",
                         "-Command",
@@ -405,56 +371,44 @@ class ImageWriter:
                     iso_drive = result.stdout.strip() + ":\\"
                     
                     try:
-                        # Copy files
                         copy_cmd = ["xcopy", f"{iso_drive}*", temp_dir, "/E", "/H", "/I"]
                         subprocess.run(copy_cmd, check=True, capture_output=True)
                     finally:
-                        # Unmount
                         unmount_cmd = ["powershell", "-Command", f"Dismount-DiskImage -ImagePath '{iso_path}'"]
                         subprocess.run(unmount_cmd, capture_output=True)
             else:
-                # Use 7z or mount and copy
                 if shutil.which("7z"):
                     extract_cmd = ["7z", "x", f"-o{temp_dir}", iso_path]
                     subprocess.run(extract_cmd, check=True, capture_output=True)
                 else:
-                    # Create a mount point
                     mount_point = os.path.join(temp_dir, "iso_mount")
                     os.makedirs(mount_point, exist_ok=True)
                     
                     try:
-                        # Mount the ISO
                         mount_cmd = ["sudo", "mount", "-o", "loop", iso_path, mount_point]
                         subprocess.run(mount_cmd, check=True, capture_output=True)
                         
-                        # Copy files
                         copy_cmd = ["cp", "-r", f"{mount_point}/.", temp_dir]
                         subprocess.run(copy_cmd, check=True, capture_output=True)
                     finally:
-                        # Unmount
                         unmount_cmd = ["sudo", "umount", mount_point]
                         subprocess.run(unmount_cmd, capture_output=True)
             
             self._update_progress(progress_callback, 50, "DOS files extracted")
             
-            # Copy files to USB
             self._update_progress(progress_callback, 60, "Copying DOS files to USB...")
             
             if self.system == "Windows":
-                # Use xcopy for Windows
                 copy_cmd = ["xcopy", f"{temp_dir}\\*", target_drive, "/E", "/H", "/I"]
                 subprocess.run(copy_cmd, check=True, capture_output=True)
             else:
-                # Use cp for Linux/macOS
                 copy_cmd = ["cp", "-r", f"{temp_dir}/.", target_drive]
                 subprocess.run(copy_cmd, check=True, capture_output=True)
             
             self._update_progress(progress_callback, 90, "DOS files copied to USB")
             
-            # Make the USB bootable
             self._update_progress(progress_callback, 95, "Making USB bootable...")
             
-            # Look for sys.com or equivalent
             sys_file = None
             for root, _, files in os.walk(temp_dir):
                 for file in files:
@@ -465,7 +419,6 @@ class ImageWriter:
                     break
             
             if sys_file and self.system == "Windows":
-                # Run sys.com to make the USB bootable
                 sys_cmd = [sys_file, target_drive[0] + ":"]
                 try:
                     subprocess.run(sys_cmd, check=True, capture_output=True)
@@ -481,7 +434,6 @@ class ImageWriter:
             self._update_progress(progress_callback, 0, f"Error writing DOS ISO: {str(e)}")
             return False
         finally:
-            # Clean up
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 self._temp_dirs.remove(temp_dir)
@@ -507,21 +459,17 @@ class ImageWriter:
         """
         self._update_progress(progress_callback, 15, "Preparing to write generic ISO...")
         
-        # Extract the ISO
         temp_dir = tempfile.mkdtemp(prefix="smartboot_iso_")
         self._temp_dirs.append(temp_dir)
         
         try:
-            # Extract ISO to temp directory
             self._update_progress(progress_callback, 20, "Extracting ISO...")
             
             if self.system == "Windows":
-                # Use 7-Zip or PowerShell to extract
                 if shutil.which("7z"):
                     extract_cmd = ["7z", "x", f"-o{temp_dir}", iso_path]
                     subprocess.run(extract_cmd, check=True, capture_output=True)
                 else:
-                    # Mount and copy
                     mount_cmd = [
                         "powershell",
                         "-Command",
@@ -531,47 +479,37 @@ class ImageWriter:
                     iso_drive = result.stdout.strip() + ":\\"
                     
                     try:
-                        # Copy files
                         copy_cmd = ["xcopy", f"{iso_drive}*", temp_dir, "/E", "/H", "/I"]
                         subprocess.run(copy_cmd, check=True, capture_output=True)
                     finally:
-                        # Unmount
                         unmount_cmd = ["powershell", "-Command", f"Dismount-DiskImage -ImagePath '{iso_path}'"]
                         subprocess.run(unmount_cmd, capture_output=True)
             else:
-                # Use 7z or mount and copy
                 if shutil.which("7z"):
                     extract_cmd = ["7z", "x", f"-o{temp_dir}", iso_path]
                     subprocess.run(extract_cmd, check=True, capture_output=True)
                 else:
-                    # Create a mount point
                     mount_point = os.path.join(temp_dir, "iso_mount")
                     os.makedirs(mount_point, exist_ok=True)
                     
                     try:
-                        # Mount the ISO
                         mount_cmd = ["sudo", "mount", "-o", "loop", iso_path, mount_point]
                         subprocess.run(mount_cmd, check=True, capture_output=True)
                         
-                        # Copy files
                         copy_cmd = ["cp", "-r", f"{mount_point}/.", temp_dir]
                         subprocess.run(copy_cmd, check=True, capture_output=True)
                     finally:
-                        # Unmount
                         unmount_cmd = ["sudo", "umount", mount_point]
                         subprocess.run(unmount_cmd, capture_output=True)
             
             self._update_progress(progress_callback, 50, "ISO files extracted")
             
-            # Copy files to USB
             self._update_progress(progress_callback, 60, "Copying files to USB...")
             
             if self.system == "Windows":
-                # Use xcopy for Windows
                 copy_cmd = ["xcopy", f"{temp_dir}\\*", target_drive, "/E", "/H", "/I"]
                 subprocess.run(copy_cmd, check=True, capture_output=True)
             else:
-                # Use cp for Linux/macOS
                 copy_cmd = ["cp", "-r", f"{temp_dir}/.", target_drive]
                 subprocess.run(copy_cmd, check=True, capture_output=True)
             
@@ -581,7 +519,6 @@ class ImageWriter:
             self._update_progress(progress_callback, 0, f"Error writing generic ISO: {str(e)}")
             return False
         finally:
-            # Clean up
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 self._temp_dirs.remove(temp_dir)
@@ -606,14 +543,11 @@ class ImageWriter:
         """
         self._update_progress(progress_callback, 15, "Preparing for direct image write...")
         
-        # Convert target_drive to device path
         device_path = target_drive
         if self.system == "Windows":
-            # If it's a drive letter, convert to physical drive
             if len(target_drive) == 1 or (len(target_drive) == 2 and target_drive[1] == ':'):
                 drive_letter = target_drive[0]
                 try:
-                    # Get physical drive number
                     cmd = [
                         "powershell",
                         "-Command",
@@ -633,7 +567,6 @@ class ImageWriter:
             elif target_drive.endswith(':\\'):
                 drive_letter = target_drive[0]
                 try:
-                    # Get physical drive number
                     cmd = [
                         "powershell",
                         "-Command",
@@ -651,10 +584,9 @@ class ImageWriter:
                     self._update_progress(progress_callback, 0, f"Error finding physical drive: {str(e)}")
                     return False
         
-        # Perform the write based on platform
         if self.system == "Windows":
             return self._write_image_windows(image_path, device_path, False, progress_callback)
-        else:  # Linux/macOS
+        else:
             return self._write_image_unix(image_path, device_path, False, progress_callback)
     
     def _write_image_windows(self,
@@ -677,31 +609,23 @@ class ImageWriter:
         """
         self._update_progress(progress_callback, 20, "Writing image to device...")
         
-        # Check if we have dd for Windows or similar tools
         dd_path = shutil.which("dd") or shutil.which("dd.exe")
         if dd_path:
-            # Use dd for direct write
             try:
                 if is_compressed:
-                    # For compressed images, use a pipe
                     if image_path.lower().endswith('.gz'):
-                        # Use gzip
                         cmd = f"gzip -dc \"{image_path}\" | {dd_path} of=\"{device_path}\" bs=4M"
                         subprocess.run(cmd, shell=True, check=True)
                     elif image_path.lower().endswith('.xz'):
-                        # Use xz
                         cmd = f"xz -dc \"{image_path}\" | {dd_path} of=\"{device_path}\" bs=4M"
                         subprocess.run(cmd, shell=True, check=True)
                     elif image_path.lower().endswith('.bz2'):
-                        # Use bzip2
                         cmd = f"bzip2 -dc \"{image_path}\" | {dd_path} of=\"{device_path}\" bs=4M"
                         subprocess.run(cmd, shell=True, check=True)
                     else:
-                        # Unsupported compression
                         self._update_progress(progress_callback, 0, f"Error: Unsupported compression format: {image_path}")
                         return False
                 else:
-                    # Direct write
                     cmd = [dd_path, f"if={image_path}", f"of={device_path}", "bs=4M"]
                     subprocess.run(cmd, check=True, capture_output=True)
                 
@@ -714,11 +638,9 @@ class ImageWriter:
                 self._update_progress(progress_callback, 0, f"Error writing image: {str(e)}")
                 return False
         else:
-            # Fallback to PowerShell for direct write
             import ctypes
             import textwrap
             try:
-                # Check for admin rights
                 try:
                     is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
                 except Exception:
@@ -726,21 +648,17 @@ class ImageWriter:
                 if not is_admin:
                     self._update_progress(progress_callback, 0, "Error: This operation requires Administrator privileges. Please run SmartBoot as Administrator.")
                     return False
-                # PowerShell direct write using streaming approach with chunks
-                # This avoids loading the entire file into memory at once
                 ps_script = textwrap.dedent(f"""
                     $ErrorActionPreference = 'Stop'
                     try {{
                         $source = [System.IO.File]::OpenRead('{image_path}')
                         try {{
-                            # Use CreateFile API with direct access to physical drive
                             $GENERIC_WRITE = 0x40000000
                             $FILE_SHARE_WRITE = 0x2
                             $OPEN_EXISTING = 3
                             $FILE_FLAG_NO_BUFFERING = 0x20000000
                             $FILE_FLAG_WRITE_THROUGH = 0x80000000
                             
-                            # Load necessary API
                             Add-Type -TypeDefinition @"
                             using System;
                             using System.IO;
@@ -778,13 +696,11 @@ class ImageWriter:
                             }}
                             
                             try {{
-                                # Use 1MB chunks to avoid memory issues
                                 $buffer = New-Object byte[] (1MB)
                                 $bytesRead = 0
                                 $totalWritten = 0
                                 $bytesWritten = 0
                                 
-                                # Read and write in chunks
                                 while (($bytesRead = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {{
                                     [NativeMethods]::WriteFile($handle, $buffer, $bytesRead, [ref]$bytesWritten, [IntPtr]::Zero) | Out-Null
                                     $totalWritten += $bytesWritten
@@ -792,12 +708,10 @@ class ImageWriter:
                                 }}
                             }}
                             finally {{
-                                # Always close the handle
                                 [NativeMethods]::CloseHandle($handle) | Out-Null
                             }}
                         }}
                         finally {{
-                            # Always close the source file
                             $source.Close()
                         }}
                     }} catch {{
@@ -815,9 +729,7 @@ class ImageWriter:
                     error_output += f"\n[stderr]\n{e.stderr.strip()}"
                 if hasattr(e, 'stdout') and e.stdout:
                     error_output += f"\n[stdout]\n{e.stdout.strip()}"
-                # Print error output to console for debugging
                 print("[PowerShell Write Error]", error_output)
-                # Optionally, log to file if logger is available
                 try:
                     import logging
                     logging.error("PowerShell Write Error:%s", error_output)
@@ -851,29 +763,22 @@ class ImageWriter:
         
         try:
             if is_compressed:
-                # For compressed images, use a pipe
                 if image_path.lower().endswith('.gz'):
-                    # Use gzip
                     cmd = f"gzip -dc \"{image_path}\" | sudo dd of=\"{device_path}\" bs=4M status=progress"
                     subprocess.run(cmd, shell=True, check=True)
                 elif image_path.lower().endswith('.xz'):
-                    # Use xz
                     cmd = f"xz -dc \"{image_path}\" | sudo dd of=\"{device_path}\" bs=4M status=progress"
                     subprocess.run(cmd, shell=True, check=True)
                 elif image_path.lower().endswith('.bz2'):
-                    # Use bzip2
                     cmd = f"bzip2 -dc \"{image_path}\" | sudo dd of=\"{device_path}\" bs=4M status=progress"
                     subprocess.run(cmd, shell=True, check=True)
                 else:
-                    # Unsupported compression
                     self._update_progress(progress_callback, 0, f"Error: Unsupported compression format: {image_path}")
                     return False
             else:
-                # Direct write
                 cmd = ["sudo", "dd", f"if={image_path}", f"of={device_path}", "bs=4M", "status=progress"]
                 subprocess.run(cmd, check=True, capture_output=True)
             
-            # Sync to ensure all writes are complete
             subprocess.run(["sync"], check=True)
             
             self._update_progress(progress_callback, 100, "Image written successfully")

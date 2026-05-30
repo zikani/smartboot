@@ -27,7 +27,7 @@ class BaseBootSector:
             resource_dir (str): Directory for storing resources
         """
         self.resource_dir = resource_dir
-        self._mounted_paths = []  # Track mounted paths for cleanup
+        self._mounted_paths = []
     
     def __del__(self):
         """Clean up resources on deletion."""
@@ -35,7 +35,7 @@ class BaseBootSector:
     
     def _cleanup_mounts(self):
         """Clean up any mounted partitions."""
-        pass  # Implemented by platform-specific classes
+        pass
     
     def check_admin_privileges(self) -> bool:
         """
@@ -44,7 +44,7 @@ class BaseBootSector:
         Returns:
             bool: True if has admin privileges, False otherwise
         """
-        return False  # Base implementation always returns False
+        return False
     
     def write_bios_boot(
         self,
@@ -134,7 +134,6 @@ class BaseBootSector:
         mbr_bin = os.path.join(self.resource_dir, 'mbr.bin')
         if not os.path.exists(mbr_bin):
             with open(mbr_bin, 'wb') as f:
-                # Standard MBR boot code with partition table validation
                 f.write(bytes.fromhex('33C08ED0BC007C8BF4507C50068C067C681E0001066'))
                 f.write(bytes.fromhex('8B1E5C7C66FF065A7CB8C07CEB4E0752E280F2B280'))
                 f.write(bytes.fromhex('F6F372CD13731F8BF5EA007C0000B041BBAA55CD13'))

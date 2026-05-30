@@ -1,0 +1,77 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black isort mypy pylint
+    
+    - name: Run Black
+      run: |
+        black --check --diff .
+    
+    - name: Run isort
+      run: |
+        isort --check-only --diff .
+    
+    - name: Run flake8
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=100 --statistics
+    
+    - name: Run mypy
+      run: |
+        mypy core/ gui/ utils/ --ignore-missing-imports || true
+    
+    - name: Run pylint
+      run: |
+        pylint core/ gui/ utils/ --exit-zero || true
+
+  security:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit safety
+    
+    - name: Run Bandit
+      run: |
+        bandit -r core/ gui/ utils/ -f json -o bandit-report.json || true
+    
+    - name: Run Safety
+      run: |
+        safety check --json > safety-report.json || true
+    
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          safety-report.json
