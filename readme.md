@@ -188,10 +188,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-- 📖 [Documentation](docs/)
-- 🐛 [Report Issues](https://github.com/zikani/smartboot/issues)
-- 💬 [Discussions](https://github.com/zikani/smartboot/discussions)
-- 📧 Email: support@smartboot.dev
+- [Documentation](docs/)
+- [Report Issues](https://github.com/zikani/smartboot/issues)
+- [Discussions](https://github.com/zikani/smartboot/discussions)
+- Email: support@smartboot.dev
 
 ## Donate
 

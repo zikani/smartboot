@@ -79,17 +79,14 @@ class LinuxBootSector(BaseBootSector):
         if not path:
             return None
         
-        if not path.startswith('/dev/'):
-            dev = f"/dev/{path}"
-        else:
-            dev = path
-            
-        partition = f"{dev}{number}"
+        path = self._normalize_device_path(path)
+        
+        partition = f"{path}{number}"
         if os.path.exists(partition):
             return partition
         
-        if os.path.exists(f"{dev}p{number}"):
-            return f"{dev}p{number}"
+        if os.path.exists(f"{path}p{number}"):
+            return f"{path}p{number}"
         
         return None
     

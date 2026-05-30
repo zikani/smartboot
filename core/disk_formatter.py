@@ -91,7 +91,7 @@ class DiskFormatter:
     ) -> Tuple[bool, str]:
         """Format a disk on Windows."""
         disk_number = device.get('number')
-        if disk_number is None or disk_number < 0:
+        if disk_number is None or disk_number < 0 or disk_number == -1:
             self._update_progress(progress_callback, 0, "Error: Invalid device number")
             return False, ""
 

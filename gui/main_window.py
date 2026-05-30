@@ -52,7 +52,14 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
         
         header_layout = QHBoxLayout()
-        logo_label = QLabel("🚀")
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'icons', 'smartboot_256x256.png')
+        if os.path.exists(icon_path):
+            logo_pixmap = QIcon(icon_path).pixmap(32, 32)
+            logo_label = QLabel()
+            logo_label.setPixmap(logo_pixmap)
+        else:
+            logo_label = QLabel("SB")
+            logo_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #2196f3;")
         logo_label.setStyleSheet("font-size: 24px;")
         title_label = QLabel("SmartBoot")
         title_label.setStyleSheet("font-size: 24px; font-weight: bold;")

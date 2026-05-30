@@ -37,7 +37,14 @@ class WindowsBootSector(BaseBootSector):
     def write_bios_boot(self, device: Dict[str, Any], options: Dict[str, Any], 
                        progress_callback: Optional[Callable[[int, str], None]] = None) -> bool:
         """Write BIOS boot sector using bootsect.exe or fallback methods."""
-        drive = device['drive']
+        if not self._validate_device_dict(device):
+            self._update(progress_callback, 0, 'Error: Invalid device information')
+            return False
+        
+        drive = self._get_device_drive(device)
+        if not drive:
+            self._update(progress_callback, 0, 'Error: Drive letter not found in device information')
+            return False
         
         if self._try_bootsect(drive, progress_callback):
             return True
@@ -105,10 +112,25 @@ class WindowsBootSector(BaseBootSector):
         """Final fallback using PowerShell script."""
         self._update(progress_callback, 95, 'Attempting PowerShell fallback...')
         script_path = os.path.join(os.path.dirname(__file__), 'usb_boot_fallback.ps1')
+        
+        if not os.path.exists(script_path):
+            self._update(progress_callback, 0, 'PowerShell fallback script not found, skipping')
+            return False
+        
+        drive = self._get_device_drive(device)
+        if not drive:
+            self._update(progress_callback, 0, 'Error: Drive letter not found for PowerShell fallback')
+            return False
+        
+        iso_path = options.get('iso_path')
+        if not iso_path:
+            self._update(progress_callback, 0, 'Error: ISO path not found in options')
+            return False
+        
         try:
             result = subprocess.run(
                 ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', script_path,
-                 '-DriveLetter', device['drive'], '-IsoPath', options['iso_path']],
+                 '-DriveLetter', drive, '-IsoPath', iso_path],
                 capture_output=True,
                 text=True
             )
@@ -140,13 +162,17 @@ class WindowsBootSector(BaseBootSector):
         Returns:
             bool: True if successful, False otherwise
         """
+        if not self._validate_device_dict(device):
+            self._update(progress_callback, 0, 'Error: Invalid device information')
+            return False
+        
         try:
             is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
             if not is_admin:
                 self._update(progress_callback, 0, "Error: Administrator privileges required for writing UEFI boot files")
                 return False
 
-            drive = device.get('drive_letter')
+            drive = self._get_device_drive(device)
             if not drive:
                 self._update(progress_callback, 0, 'Drive letter not found for UEFI boot')
                 return False
@@ -329,7 +355,11 @@ class WindowsBootSector(BaseBootSector):
         Returns:
             bool: True if successful, False otherwise
         """
-        drive = device.get('drive_letter')
+        if not self._validate_device_dict(device):
+            self._update(progress_callback, 0, 'Error: Invalid device information')
+            return False
+        
+        drive = self._get_device_drive(device)
         if not drive:
             self._update(progress_callback, 0, 'Drive letter not found for FreeDOS boot')
             return False

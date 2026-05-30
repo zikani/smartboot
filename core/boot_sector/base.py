@@ -37,6 +37,51 @@ class BaseBootSector:
         """Clean up any mounted partitions."""
         pass
     
+    def _get_device_drive(self, device: Dict[str, Any]) -> Optional[str]:
+        """
+        Get the drive letter from device dictionary with backward compatibility.
+        
+        Args:
+            device (Dict[str, Any]): Device information dictionary
+            
+        Returns:
+            Optional[str]: Drive letter or None if not found
+        """
+        return device.get('drive_letter') or device.get('drive')
+    
+    def _normalize_device_path(self, device_name: str) -> str:
+        """
+        Normalize device path by ensuring it starts with /dev/ for Linux/macOS.
+        
+        Args:
+            device_name (str): Device name or path
+            
+        Returns:
+            str: Normalized device path
+        """
+        if not device_name.startswith('/dev/'):
+            return f"/dev/{device_name}"
+        return device_name
+    
+    def _validate_device_dict(self, device: Dict[str, Any], required_keys: list = None) -> bool:
+        """
+        Validate device dictionary has required keys.
+        
+        Args:
+            device (Dict[str, Any]): Device information dictionary
+            required_keys (list): List of required keys (default: ['name'])
+            
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        if required_keys is None:
+            required_keys = ['name']
+        
+        for key in required_keys:
+            if key not in device:
+                return False
+        return True
+    
     def check_admin_privileges(self) -> bool:
         """
         Check if the current process has administrator/root privileges.

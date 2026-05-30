@@ -10,7 +10,7 @@ import subprocess
 import re
 from typing import List, Dict, Any, Optional
 
-from .boot_sector import BootSectorManager
+from .boot_sector.manager import BootSectorManager
 from utils.logger import default_logger as logger
 
 

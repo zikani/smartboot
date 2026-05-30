@@ -10,7 +10,7 @@ import platform
 from typing import Dict, Any, Optional
 
 from utils.logger import default_logger as logger
-from .boot_sector import BootSectorManager
+from .boot_sector.manager import BootSectorManager
 
 
 class ISOManager:
