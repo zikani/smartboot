@@ -1,437 +1,444 @@
 """
-Main window for SmartBoot application
+Main window for SmartBoot
+
+All long-running operations run on a CreationWorker (QThread) so the UI
+stays responsive.  A Cancel button is exposed while work is in progress.
 """
 
-from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QLabel, QPushButton, QComboBox, QProgressBar,
-    QFileDialog, QMessageBox, QGroupBox, QFormLayout,
-    QCheckBox, QRadioButton, QButtonGroup, QSpacerItem,
-    QSizePolicy, QGridLayout
-)
-from PyQt5.QtCore import Qt, QSize
-from PyQt5.QtGui import QIcon
-from PyQt5.Qt import QApplication
-
-from core.usb_manager import USBManager
-from core.iso_manager import ISOManager
-from core.image_writer import ImageWriter
-from core.boot_sector.manager import BootSectorManager
 import os
 import tempfile
 
+from PyQt5.QtCore    import Qt, QSize
+from PyQt5.QtGui     import QIcon, QFont
+from PyQt5.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QComboBox, QProgressBar,
+    QFileDialog, QMessageBox, QGroupBox, QFormLayout,
+    QCheckBox, QRadioButton, QButtonGroup, QSizePolicy,
+    QGridLayout, QApplication,
+)
+
+from core.usb_manager          import USBManager
+from core.iso_manager          import ISOManager
+from core.image_writer         import ImageWriter
+from core.disk_formatter       import DiskFormatter
+from core.boot_sector.manager  import BootSectorManager
+from gui.worker                import CreationWorker
+
 
 class MainWindow(QMainWindow):
-    """
-    Main window for the SmartBoot application.
-    """
-    
-    def __init__(self):
+    """Main application window."""
+
+    # Map boot_type_group button id → internal string
+    _BOOT_TYPE_MAP = {0: "bios", 1: "uefi", 2: "dual", 3: "freedos"}
+
+    def __init__(self) -> None:
         super().__init__()
-        
-        self.resource_dir = os.path.join(tempfile.gettempdir(), "smartboot_resources")
+
+        self.resource_dir = os.path.join(
+            tempfile.gettempdir(), "smartboot_resources"
+        )
         os.makedirs(self.resource_dir, exist_ok=True)
-        
-        self.usb_manager = USBManager()
-        self.iso_manager = ISOManager()
-        self.usb_writer = ImageWriter()
+
+        # Core objects (stateless; re-used across operations)
+        self.usb_manager  = USBManager()
+        self.iso_manager  = ISOManager()
+        self.writer       = ImageWriter()
+        self.formatter    = DiskFormatter()
         self.boot_manager = BootSectorManager()
-        
-        self.selected_device = None
-        self.selected_iso = None
-        self.detected_iso_type = None
-        
-        self.init_ui()
-    
-    def init_ui(self):
-        """Initialize the user interface."""
-        self.setWindowTitle("SmartBoot - USB Boot Media Creator")
-        self.setMinimumSize(600, 500)
-        
-        central_widget = QWidget()
-        main_layout = QVBoxLayout(central_widget)
-        
-        header_layout = QHBoxLayout()
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'icons', 'smartboot_256x256.png')
-        if os.path.exists(icon_path):
-            logo_pixmap = QIcon(icon_path).pixmap(32, 32)
-            logo_label = QLabel()
-            logo_label.setPixmap(logo_pixmap)
-        else:
-            logo_label = QLabel("SB")
-            logo_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #2196f3;")
-        logo_label.setStyleSheet("font-size: 24px;")
-        title_label = QLabel("SmartBoot")
-        title_label.setStyleSheet("font-size: 24px; font-weight: bold;")
-        header_layout.addWidget(logo_label)
-        header_layout.addWidget(title_label)
-        header_layout.addStretch()
-        main_layout.addLayout(header_layout)
-        
-        device_group = QGroupBox("Step 1: Select USB Device")
-        device_layout = QVBoxLayout(device_group)
-        
+
+        # State
+        self.devices: list         = []
+        self.selected_device: dict = {}
+        self.selected_iso: str     = ""
+        self._worker: CreationWorker | None = None
+
+        self._build_ui()
+        self.refresh_devices()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        self.setWindowTitle("SmartBoot — USB Boot Media Creator")
+        self.setMinimumSize(640, 560)
+
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setSpacing(8)
+
+        layout.addLayout(self._make_header())
+        layout.addWidget(self._make_device_group())
+        layout.addWidget(self._make_iso_group())
+        layout.addWidget(self._make_options_group())
+        layout.addWidget(self._make_progress_group())
+        layout.addLayout(self._make_button_row())
+
+        self.setCentralWidget(root)
+
+    def _make_header(self) -> QHBoxLayout:
+        hbox = QHBoxLayout()
+        logo = QLabel("SB")
+        logo.setFont(QFont("Arial", 20, QFont.Bold))
+        logo.setStyleSheet("color: #1565C0;")
+        title = QLabel("SmartBoot")
+        title.setFont(QFont("Arial", 18, QFont.Bold))
+        hbox.addWidget(logo)
+        hbox.addWidget(title)
+        hbox.addStretch()
+        return hbox
+
+    def _make_device_group(self) -> QGroupBox:
+        grp = QGroupBox("Step 1 — Select USB Device")
+        vbox = QVBoxLayout(grp)
+
+        row = QHBoxLayout()
         self.device_combo = QComboBox()
-        self.device_combo.currentIndexChanged.connect(self.on_device_selected)
-        self.device_combo.setMinimumWidth(400)
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.clicked.connect(self.refresh_devices)
-        
-        device_select_layout = QHBoxLayout()
-        device_select_layout.addWidget(self.device_combo)
-        device_select_layout.addWidget(self.refresh_button)
-        
-        device_layout.addLayout(device_select_layout)
-        
-        self.device_info_label = QLabel("No device selected")
-        device_layout.addWidget(self.device_info_label)
-        
-        main_layout.addWidget(device_group)
-        
-        iso_group = QGroupBox("Step 2: Select ISO Image")
-        iso_layout = QVBoxLayout(iso_group)
-        
-        self.iso_path_label = QLabel("No ISO selected")
-        self.iso_path_label.setWordWrap(True)
-        self.browse_button = QPushButton("Browse")
-        self.browse_button.clicked.connect(self.browse_iso)
-        
-        iso_select_layout = QHBoxLayout()
-        iso_select_layout.addWidget(self.iso_path_label)
-        iso_select_layout.addWidget(self.browse_button)
-        
-        iso_layout.addLayout(iso_select_layout)
-        
-        self.iso_info_label = QLabel("")
-        iso_layout.addWidget(self.iso_info_label)
-        
-        main_layout.addWidget(iso_group)
-        
-        options_group = QGroupBox("Step 3: Options")
-        options_layout = QFormLayout(options_group)
-        
-        self.partition_scheme_group = QButtonGroup(self)
-        mbr_radio = QRadioButton("MBR (Legacy BIOS)")
-        gpt_radio = QRadioButton("GPT (UEFI)")
-        self.partition_scheme_group.addButton(mbr_radio, 0)
-        self.partition_scheme_group.addButton(gpt_radio, 1)
-        mbr_radio.setChecked(True)
-        
-        partition_layout = QHBoxLayout()
-        partition_layout.addWidget(mbr_radio)
-        partition_layout.addWidget(gpt_radio)
-        options_layout.addRow("Partition Scheme:", partition_layout)
-        
-        self.boot_type_group = QButtonGroup(self)
-        bios_radio = QRadioButton("BIOS")
-        uefi_radio = QRadioButton("UEFI")
-        dual_radio = QRadioButton("Dual (BIOS+UEFI)")
-        freedos_radio = QRadioButton("FreeDOS")
-        self.boot_type_group.addButton(bios_radio, 0)
-        self.boot_type_group.addButton(uefi_radio, 1)
-        self.boot_type_group.addButton(dual_radio, 2)
-        self.boot_type_group.addButton(freedos_radio, 3)
-        bios_radio.setChecked(True)
-        
-        bios_radio.toggled.connect(self.update_boot_options)
-        uefi_radio.toggled.connect(self.update_boot_options)
-        dual_radio.toggled.connect(self.update_boot_options)
-        freedos_radio.toggled.connect(self.update_boot_options)
-        mbr_radio.toggled.connect(self.update_boot_options)
-        gpt_radio.toggled.connect(self.update_boot_options)
-        
-        boot_layout = QGridLayout()
-        boot_layout.addWidget(bios_radio, 0, 0)
-        boot_layout.addWidget(uefi_radio, 0, 1)
-        boot_layout.addWidget(dual_radio, 1, 0)
-        boot_layout.addWidget(freedos_radio, 1, 1)
-        options_layout.addRow("Boot Type:", boot_layout)
-        
-        self.filesystem_combo = QComboBox()
-        self.update_filesystem_options()
-        options_layout.addRow("Filesystem:", self.filesystem_combo)
-        
-        self.format_checkbox = QCheckBox("Quick Format")
-        self.format_checkbox.setChecked(True)
-        options_layout.addRow("", self.format_checkbox)
-        
-        self.advanced_group = QGroupBox("Advanced Options")
-        self.advanced_group.setCheckable(True)
-        self.advanced_group.setChecked(False)
-        advanced_layout = QFormLayout(self.advanced_group)
-        
-        self.direct_write_checkbox = QCheckBox("Direct Write (dd mode)")
-        self.direct_write_checkbox.setToolTip("Write ISO directly to USB without extracting files")
-        advanced_layout.addRow("", self.direct_write_checkbox)
-        
+        self.device_combo.setMinimumWidth(380)
+        self.device_combo.currentIndexChanged.connect(self._on_device_changed)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh_devices)
+        row.addWidget(self.device_combo)
+        row.addWidget(self.refresh_btn)
+        vbox.addLayout(row)
+
+        self.device_info_lbl = QLabel("No device selected.")
+        self.device_info_lbl.setWordWrap(True)
+        vbox.addWidget(self.device_info_lbl)
+        return grp
+
+    def _make_iso_group(self) -> QGroupBox:
+        grp = QGroupBox("Step 2 — Select ISO Image")
+        vbox = QVBoxLayout(grp)
+
+        row = QHBoxLayout()
+        self.iso_path_lbl = QLabel("No ISO selected.")
+        self.iso_path_lbl.setWordWrap(True)
+        self.browse_btn = QPushButton("Browse…")
+        self.browse_btn.clicked.connect(self._browse_iso)
+        row.addWidget(self.iso_path_lbl, 1)
+        row.addWidget(self.browse_btn)
+        vbox.addLayout(row)
+
+        self.iso_info_lbl = QLabel("")
+        vbox.addWidget(self.iso_info_lbl)
+        return grp
+
+    def _make_options_group(self) -> QGroupBox:
+        grp = QGroupBox("Step 3 — Options")
+        form = QFormLayout(grp)
+
+        # Partition scheme
+        self.scheme_group = QButtonGroup(self)
+        mbr_rb = QRadioButton("MBR (Legacy BIOS)")
+        gpt_rb = QRadioButton("GPT (UEFI)")
+        self.scheme_group.addButton(mbr_rb, 0)
+        self.scheme_group.addButton(gpt_rb, 1)
+        mbr_rb.setChecked(True)
+        scheme_row = QHBoxLayout()
+        scheme_row.addWidget(mbr_rb)
+        scheme_row.addWidget(gpt_rb)
+        form.addRow("Partition Scheme:", scheme_row)
+
+        # Boot type
+        self.boot_group = QButtonGroup(self)
+        bios_rb   = QRadioButton("BIOS")
+        uefi_rb   = QRadioButton("UEFI")
+        dual_rb   = QRadioButton("Dual (BIOS+UEFI)")
+        fdos_rb   = QRadioButton("FreeDOS")
+        for bid, rb in enumerate([bios_rb, uefi_rb, dual_rb, fdos_rb]):
+            self.boot_group.addButton(rb, bid)
+        bios_rb.setChecked(True)
+
+        boot_grid = QGridLayout()
+        boot_grid.addWidget(bios_rb,  0, 0)
+        boot_grid.addWidget(uefi_rb,  0, 1)
+        boot_grid.addWidget(dual_rb,  1, 0)
+        boot_grid.addWidget(fdos_rb,  1, 1)
+        form.addRow("Boot Type:", boot_grid)
+
+        # Wire scheme/boot interdependency
+        for btn in self.scheme_group.buttons() + self.boot_group.buttons():
+            btn.toggled.connect(self._sync_boot_options)
+
+        # Filesystem
+        self.fs_combo = QComboBox()
+        self._update_fs_options()
+        form.addRow("Filesystem:", self.fs_combo)
+
+        # Quick format
+        self.quick_fmt_chk = QCheckBox("Quick Format")
+        self.quick_fmt_chk.setChecked(True)
+        form.addRow("", self.quick_fmt_chk)
+
+        # Advanced options (collapsible)
+        adv_grp = QGroupBox("Advanced Options")
+        adv_grp.setCheckable(True)
+        adv_grp.setChecked(False)
+        adv_form = QFormLayout(adv_grp)
+
+        self.direct_write_chk = QCheckBox("Direct Write (dd-like)")
+        self.direct_write_chk.setToolTip(
+            "Write ISO bytes directly to the device — faster, "
+            "but skips file extraction and boot sector steps."
+        )
+        adv_form.addRow("", self.direct_write_chk)
+
         self.iso_type_combo = QComboBox()
-        self.iso_type_combo.addItems(["Auto-detect", "Windows", "Linux", "FreeDOS", "Generic"])
-        advanced_layout.addRow("ISO Type:", self.iso_type_combo)
-        
-        options_layout.addRow("", self.advanced_group)
-        
-        main_layout.addWidget(options_group)
-        
-        progress_group = QGroupBox("Progress")
-        progress_layout = QVBoxLayout(progress_group)
-        
+        self.iso_type_combo.addItems(
+            ["Auto-detect", "Windows", "Linux", "FreeDOS", "Generic"]
+        )
+        adv_form.addRow("ISO Type Override:", self.iso_type_combo)
+        self._adv_grp = adv_grp
+        form.addRow("", adv_grp)
+
+        return grp
+
+    def _make_progress_group(self) -> QGroupBox:
+        grp = QGroupBox("Progress")
+        vbox = QVBoxLayout(grp)
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
-        self.status_label = QLabel("Ready")
-        
-        progress_layout.addWidget(self.progress_bar)
-        progress_layout.addWidget(self.status_label)
-        
-        main_layout.addWidget(progress_group)
-        
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        
-        self.start_button = QPushButton("START")
-        self.start_button.setMinimumSize(100, 40)
-        self.start_button.clicked.connect(self.start_process)
-        self.start_button.setEnabled(False)
-        
-        button_layout.addWidget(self.start_button)
-        main_layout.addLayout(button_layout)
-        
-        self.setCentralWidget(central_widget)
-        
-        self.refresh_devices()
-    
-    def refresh_devices(self):
-        """Refresh the list of USB devices."""
+        self.status_lbl = QLabel("Ready.")
+        self.status_lbl.setWordWrap(True)
+        vbox.addWidget(self.progress_bar)
+        vbox.addWidget(self.status_lbl)
+        return grp
+
+    def _make_button_row(self) -> QHBoxLayout:
+        hbox = QHBoxLayout()
+        hbox.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setMinimumSize(100, 38)
+        self.cancel_btn.setVisible(False)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        hbox.addWidget(self.cancel_btn)
+
+        self.start_btn = QPushButton("START")
+        self.start_btn.setMinimumSize(110, 38)
+        self.start_btn.setEnabled(False)
+        self.start_btn.clicked.connect(self._on_start)
+        self.start_btn.setStyleSheet(
+            "QPushButton { background-color: #1565C0; color: white; "
+            "font-weight: bold; border-radius: 4px; }"
+            "QPushButton:disabled { background-color: #90A4AE; }"
+        )
+        hbox.addWidget(self.start_btn)
+        return hbox
+
+    # ------------------------------------------------------------------
+    # Device management
+    # ------------------------------------------------------------------
+
+    def refresh_devices(self) -> None:
+        self.device_combo.blockSignals(True)
         self.device_combo.clear()
         try:
             self.devices = self.usb_manager.get_devices()
             if not self.devices:
                 self.device_combo.addItem("No USB devices found")
-                self.device_info_label.setText("No devices found")
-                self.selected_device = None
-                self.update_start_button()
-                return
-            for device in self.devices:
-                self.device_combo.addItem(f"{device['name']} ({device['size']})")
-            self.device_combo.setCurrentIndex(0)
-            self.selected_device = self.devices[0]
-            self.update_device_info()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error refreshing devices: {str(e)}")
-            self.device_info_label.setText("Error loading devices")
-    
-    def update_device_info(self):
-        """Update the device information display."""
-        if self.selected_device:
-            info = (
-                f"Device: {self.selected_device['name']}\n"
-                f"Size: {self.selected_device['size']}\n"
-                f"File System: {self.selected_device.get('filesystem', 'Unknown')}"
-            )
-            self.device_info_label.setText(info)
-        else:
-            self.device_info_label.setText("No device selected")
-        self.update_start_button()
-
-    def on_device_selected(self, index):
-        if hasattr(self, 'devices') and self.devices and 0 <= index < len(self.devices):
-            self.selected_device = self.devices[index]
-        else:
-            self.selected_device = None
-        self.update_device_info()
-    
-    def browse_iso(self):
-        """Open file dialog to select an ISO file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select ISO File", "", "ISO Files (*.iso);;All Files (*)"
-        )
-        
-        if file_path:
-            self.selected_iso = file_path
-            self.iso_path_label.setText(file_path)
-            try:
-                iso_info = self.iso_manager.get_iso_info(file_path)
-                self.iso_info_label.setText(
-                    f"Size: {iso_info['size']}\n"
-                    f"Type: {iso_info.get('type', 'Unknown')}"
-                )
-            except Exception as e:
-                QMessageBox.warning(self, "Warning", f"Could not read ISO details: {str(e)}")
-                self.iso_info_label.setText(f"Size: Unknown\nType: Unknown")
-        
-        self.update_start_button()
-    
-    def update_filesystem_options(self):
-        """Update filesystem options based on selected boot type and partition scheme."""
-        current_fs = self.filesystem_combo.currentText() if self.filesystem_combo.count() > 0 else "FAT32"
-        self.filesystem_combo.clear()
-        
-        boot_type_id = self.boot_type_group.checkedId() if hasattr(self, 'boot_type_group') else 0
-        partition_scheme_id = self.partition_scheme_group.checkedId()
-        
-        if boot_type_id == 3:
-            self.filesystem_combo.addItems(["FAT32", "FAT"])
-        elif boot_type_id == 1 or boot_type_id == 2:
-            if partition_scheme_id == 1:
-                self.filesystem_combo.addItems(["FAT32", "NTFS", "exFAT"])
+                self.selected_device = {}
             else:
-                self.filesystem_combo.addItems(["FAT32", "NTFS", "exFAT"])
+                for dev in self.devices:
+                    self.device_combo.addItem(
+                        f"{dev['name']}  ({dev['size']})"
+                    )
+                self.selected_device = self.devices[0]
+        except Exception as exc:
+            QMessageBox.critical(self, "Error",
+                                 f"Failed to enumerate devices:\n{exc}")
+            self.selected_device = {}
+        finally:
+            self.device_combo.blockSignals(False)
+            self.device_combo.setCurrentIndex(0)
+            self._update_device_info()
+
+    def _on_device_changed(self, idx: int) -> None:
+        if self.devices and 0 <= idx < len(self.devices):
+            self.selected_device = self.devices[idx]
         else:
-            self.filesystem_combo.addItems(["FAT32", "NTFS", "exFAT", "UDF"])
-        
-        index = self.filesystem_combo.findText(current_fs)
-        if index >= 0:
-            self.filesystem_combo.setCurrentIndex(index)
-    
-    def update_boot_options(self):
-        """Update UI based on boot type and partition scheme selections."""
-        boot_type_id = self.boot_type_group.checkedId()
-        partition_scheme_id = self.partition_scheme_group.checkedId()
-        
-        if boot_type_id == 1:
-            if partition_scheme_id == 0:
-                self.partition_scheme_group.button(1).setChecked(True)
-        elif boot_type_id == 3:
-            if partition_scheme_id == 1:
-                self.partition_scheme_group.button(0).setChecked(True)
-        
-        self.update_filesystem_options()
-    
-    def update_start_button(self):
-        """Update the state of the start button based on selections."""
-        self.start_button.setEnabled(
-            self.selected_device is not None and 
-            self.selected_iso is not None
+            self.selected_device = {}
+        self._update_device_info()
+
+    def _update_device_info(self) -> None:
+        if self.selected_device:
+            d = self.selected_device
+            self.device_info_lbl.setText(
+                f"Name: {d.get('name','?')}   "
+                f"Size: {d.get('size','?')}   "
+                f"FS: {d.get('filesystem','?')}"
+            )
+        else:
+            self.device_info_lbl.setText("No device selected.")
+        self._update_start_btn()
+
+    # ------------------------------------------------------------------
+    # ISO selection
+    # ------------------------------------------------------------------
+
+    def _browse_iso(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select ISO File", "",
+            "ISO Images (*.iso);;All Files (*)"
         )
-    
-    def start_process(self):
-        """Start the process of creating bootable USB."""
+        if not path:
+            return
+        self.selected_iso = path
+        self.iso_path_lbl.setText(path)
+        try:
+            info = self.iso_manager.get_iso_info(path)
+            self.iso_info_lbl.setText(
+                f"Size: {info['size']}   Type: {info.get('type','Unknown')}"
+            )
+        except Exception as exc:
+            self.iso_info_lbl.setText(f"Could not read ISO info: {exc}")
+        self._update_start_btn()
+
+    # ------------------------------------------------------------------
+    # Options synchronisation
+    # ------------------------------------------------------------------
+
+    def _sync_boot_options(self) -> None:
+        boot_id   = self.boot_group.checkedId()
+        scheme_id = self.scheme_group.checkedId()
+
+        # UEFI / Dual should prefer GPT
+        if boot_id in (1, 2) and scheme_id == 0:
+            self.scheme_group.button(1).setChecked(True)
+        # FreeDOS needs MBR
+        elif boot_id == 3 and scheme_id == 1:
+            self.scheme_group.button(0).setChecked(True)
+
+        self._update_fs_options()
+
+    def _update_fs_options(self) -> None:
+        current = self.fs_combo.currentText() if self.fs_combo.count() else "FAT32"
+        self.fs_combo.clear()
+
+        boot_id = self.boot_group.checkedId() if hasattr(self, "boot_group") else 0
+
+        if boot_id == 3:                        # FreeDOS
+            options = ["FAT32", "FAT"]
+        elif boot_id in (1, 2):                 # UEFI / Dual
+            options = ["FAT32", "NTFS", "exFAT"]
+        else:                                   # BIOS
+            options = ["FAT32", "NTFS", "exFAT", "UDF"]
+
+        self.fs_combo.addItems(options)
+        idx = self.fs_combo.findText(current)
+        if idx >= 0:
+            self.fs_combo.setCurrentIndex(idx)
+
+    def _update_start_btn(self) -> None:
+        self.start_btn.setEnabled(
+            bool(self.selected_device)
+            and bool(self.selected_iso)
+            and self._worker is None
+        )
+
+    # ------------------------------------------------------------------
+    # Start / Cancel
+    # ------------------------------------------------------------------
+
+    def _on_start(self) -> None:
+        # Safety confirmation
+        name = self.selected_device.get("name", "the selected device")
         reply = QMessageBox.warning(
             self,
-            "Warning - Data Loss",
-            f"This will erase ALL data on {self.selected_device['name']}\nDo you want to continue?",
+            "Data Loss Warning",
+            f"ALL data on '{name}' will be permanently erased.\n\n"
+            "Are you sure you want to continue?",
             QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-            
-        self.setEnabled(False)
-        QApplication.processEvents()
-        
-        try:
-            partition_scheme = "MBR" if self.partition_scheme_group.checkedId() == 0 else "GPT"
-            filesystem = self.filesystem_combo.currentText()
-            quick_format = self.format_checkbox.isChecked()
-            
-            boot_type_map = {
-                0: "bios",
-                1: "uefi",
-                2: "dual",
-                3: "freedos"
-            }
-            boot_type = boot_type_map.get(self.boot_type_group.checkedId(), "bios")
-            
-            iso_type = "auto"
-            if self.advanced_group.isChecked():
-                iso_type_text = self.iso_type_combo.currentText().lower()
-                if iso_type_text != "auto-detect":
-                    iso_type = iso_type_text
-            
-            direct_write = False
-            if self.advanced_group.isChecked():
-                direct_write = self.direct_write_checkbox.isChecked()
-            
-            options = {
-                'partition_scheme': partition_scheme,
-                'filesystem': filesystem,
-                'quick_format': quick_format,
-                'boot_type': boot_type,
-                'iso_type': iso_type,
-                'direct_write': direct_write
-            }
-            
-            def progress_callback(percent, message):
-                self.progress_bar.setValue(percent)
-                self.status_label.setText(message)
-                QApplication.processEvents()
-                
-            self.status_label.setText("Starting process...")
+
+        options = self._collect_options()
+        self._set_working(True)
+
+        self._worker = CreationWorker(
+            formatter    = self.formatter,
+            writer       = self.writer,
+            boot_manager = self.boot_manager,
+            device       = self.selected_device,
+            iso_path     = self.selected_iso,
+            options      = options,
+            parent       = self,
+        )
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.start()
+
+    def _on_cancel(self) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self.status_lbl.setText("Cancelling… please wait.")
+            self.cancel_btn.setEnabled(False)
+
+    def _on_progress(self, pct: int, msg: str) -> None:
+        self.progress_bar.setValue(pct)
+        self.status_lbl.setText(msg)
+
+    def _on_finished(self, success: bool, msg: str) -> None:
+        self._set_working(False)
+        self._worker = None
+        self.progress_bar.setValue(100 if success else self.progress_bar.value())
+        self.status_lbl.setText(msg)
+
+        if success:
+            QMessageBox.information(self, "Success", msg)
+        else:
+            QMessageBox.warning(self, "Completed with issues", msg)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _collect_options(self) -> dict:
+        scheme   = "MBR" if self.scheme_group.checkedId() == 0 else "GPT"
+        boot     = self._BOOT_TYPE_MAP.get(self.boot_group.checkedId(), "bios")
+        fs       = self.fs_combo.currentText()
+        quick    = self.quick_fmt_chk.isChecked()
+        advanced = self._adv_grp.isChecked()
+        direct   = self.direct_write_chk.isChecked() if advanced else False
+
+        iso_type = "auto"
+        if advanced:
+            raw = self.iso_type_combo.currentText().lower()
+            if raw != "auto-detect":
+                iso_type = raw
+
+        return {
+            "partition_scheme": scheme,
+            "boot_type":        boot,
+            "filesystem":       fs,
+            "quick_format":     quick,
+            "direct_write":     direct,
+            "iso_type":         iso_type,
+        }
+
+    def _set_working(self, working: bool) -> None:
+        """Toggle UI elements between idle and working states."""
+        self.start_btn.setVisible(not working)
+        self.cancel_btn.setVisible(working)
+        self.cancel_btn.setEnabled(working)
+
+        self.refresh_btn.setEnabled(not working)
+        self.browse_btn.setEnabled(not working)
+        self.device_combo.setEnabled(not working)
+
+        if working:
             self.progress_bar.setValue(0)
-            
-            from core.disk_formatter import DiskFormatter
-            formatter = DiskFormatter()
-            
-            self.status_label.setText("Formatting USB drive...")
-            success_format, drive_path = formatter.format_disk(
-                self.selected_device,
-                filesystem,
-                "SMARTBOOT",
-                partition_scheme,
-                quick_format,
-                progress_callback
-            )
-            
-            if not success_format:
-                self.status_label.setText("Failed to format USB drive.")
-                QMessageBox.critical(self, "Error", "Failed to format USB drive.")
-                return
-                
-            if drive_path:
-                self.selected_device['drive_letter'] = drive_path
-            
-            if direct_write:
-                from core.image_writer import ImageWriter
-                writer = ImageWriter()
-                
-                self.status_label.setText("Writing ISO directly to USB...")
-                success_write = writer.write_disk_image(
-                    self.selected_iso,
-                    self.selected_device.get('name'),
-                    progress_callback
-                )
-                
-                if success_write:
-                    self.status_label.setText("USB drive created successfully!")
-                    self.progress_bar.setValue(100)
-                    QMessageBox.information(self, "Success", "USB drive created successfully!")
-                else:
-                    self.status_label.setText("Failed to write ISO to USB drive.")
-                    QMessageBox.critical(self, "Error", "Failed to write ISO to USB drive.")
-            else:
-                self.status_label.setText("Writing ISO to USB...")
-                
-                from core.image_writer import ImageWriter
-                writer = ImageWriter()
-                
-                success_iso = writer.write_iso(
-                    self.selected_iso,
-                    self.selected_device.get('drive_letter'),
-                    iso_type,
-                    not direct_write,
-                    progress_callback
-                )
-                
-                if not success_iso:
-                    self.status_label.setText("Failed to write ISO to USB drive.")
-                    QMessageBox.critical(self, "Error", "Failed to write ISO to USB drive.")
-                    return
-                    
-                self.status_label.setText("Writing boot sector...")
-                boot_success = self.boot_manager.write_boot_sector(
-                    self.selected_device,
-                    options,
-                    progress_callback
-                )
-                
-                if boot_success:
-                    self.status_label.setText("USB drive created successfully!")
-                    self.progress_bar.setValue(100)
-                    QMessageBox.information(self, "Success", "USB drive created successfully!")
-                else:
-                    self.status_label.setText("USB drive created but boot sector writing failed.")
-                    QMessageBox.warning(self, "Warning", "USB created but could not write boot sector.")
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Error during writing process: {str(e)}")
-        finally:
-            self.setEnabled(True)
+            self.status_lbl.setText("Starting…")
+        else:
+            self._update_start_btn()
+
+    def closeEvent(self, event) -> None:
+        """Ensure the worker thread is stopped before the window closes."""
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.wait(5000)   # 5 s grace period
+        event.accept()

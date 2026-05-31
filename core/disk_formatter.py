@@ -1,48 +1,43 @@
 """
 Disk Formatter module for SmartBoot
 
-This module handles formatting USB devices with various filesystems.
-Supports FAT/FAT32/NTFS/exFAT/UDF/ReFS on Windows and ext2/ext3/ext4 on Linux.
+Handles formatting USB devices with various filesystems.
+Supports FAT/FAT32/NTFS/exFAT/UDF/ReFS on Windows, ext2/3/4 on Linux,
+and FAT32/ExFAT/APFS/HFS+ on macOS.
 """
+
 import os
 import platform
 import subprocess
 import time
 import shutil
 from typing import Dict, Any, Callable, Optional, List, Tuple
-from ..utils.logger import default_logger as logger
+
+# Absolute import — works regardless of how the package is invoked.
+from utils.logger import default_logger as logger
 
 
 class DiskFormatter:
-    """
-    Class for formatting disks with various filesystems.
-    Handles formatting, partitioning, and filesystem creation.
-    """
-    
-    SUPPORTED_FS = {
-        'Windows': ['FAT', 'FAT32', 'NTFS', 'exFAT', 'UDF', 'ReFS'],
-        'Linux': ['fat', 'fat32', 'ntfs', 'exfat', 'ext2', 'ext3', 'ext4', 'udf'],
-        'Darwin': ['FAT32', 'ExFAT', 'NTFS', 'APFS', 'HFS+']
+    """Format disks with various filesystems across Windows, Linux, and macOS."""
+
+    SUPPORTED_FS: Dict[str, List[str]] = {
+        "Windows": ["FAT", "FAT32", "NTFS", "exFAT", "UDF", "ReFS"],
+        "Linux":   ["fat", "fat32", "ntfs", "exfat",
+                    "ext2", "ext3", "ext4", "udf"],
+        "Darwin":  ["FAT32", "ExFAT", "NTFS", "APFS", "HFS+"],
     }
-    
-    def __init__(self):
-        """Initialize the Disk Formatter."""
-        logger.debug("DiskFormatter: Initializing Disk Formatter.")
+
+    def __init__(self) -> None:
+        logger.debug("DiskFormatter: Initialising.")
         self.system = platform.system()
-        logger.debug(f"DiskFormatter: Detected platform system: {self.system}")
-    
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def get_supported_filesystems(self) -> List[str]:
-        """
-        Get list of supported filesystems for the current OS.
-        
-        Returns:
-            List[str]: List of supported filesystem names
-        """
-        logger.debug(f"DiskFormatter: Getting supported filesystems for {self.system}")
-        fs = self.SUPPORTED_FS.get(self.system, [])
-        logger.debug(f"DiskFormatter: Supported filesystems: {fs}")
-        return fs
-    
+        return self.SUPPORTED_FS.get(self.system, [])
+
     def format_disk(
         self,
         device: Dict[str, Any],
@@ -50,36 +45,50 @@ class DiskFormatter:
         label: str = "BOOTABLE",
         partition_scheme: str = "MBR",
         quick_format: bool = True,
-        progress_callback: Optional[Callable[[int, str], None]] = None
+        progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> Tuple[bool, str]:
         """
         Format a disk with the specified filesystem.
+
+        Returns:
+            (success, drive_letter_or_mount_point)
         """
-        logger.debug(f"DiskFormatter: format_disk called with device={device}, filesystem={filesystem}, label={label}, partition_scheme={partition_scheme}, quick_format={quick_format}")
+        logger.debug(
+            f"DiskFormatter: format_disk device={device!r} "
+            f"fs={filesystem} scheme={partition_scheme}"
+        )
         try:
-            if 'error' in device:
-                logger.error(f"DiskFormatter: Device error: {device['error']}")
-                self._update_progress(progress_callback, 0, f"Error: {device['error']}")
+            if "error" in device:
+                self._progress(progress_callback, 0, f"Error: {device['error']}")
                 return False, ""
-                
-            if self.system == 'Windows':
-                logger.debug("DiskFormatter: Using Windows format routine.")
-                return self._format_windows(device, filesystem, label, partition_scheme, quick_format, progress_callback)
-            elif self.system == 'Linux':
-                logger.debug("DiskFormatter: Using Linux format routine.")
-                return self._format_linux(device, filesystem, label, partition_scheme, quick_format, progress_callback)
-            elif self.system == 'Darwin':
-                logger.debug("DiskFormatter: Using macOS format routine.")
-                return self._format_macos(device, filesystem, label, partition_scheme, quick_format, progress_callback)
+
+            if self.system == "Windows":
+                return self._format_windows(
+                    device, filesystem, label, partition_scheme,
+                    quick_format, progress_callback
+                )
+            elif self.system == "Linux":
+                return self._format_linux(
+                    device, filesystem, label, partition_scheme,
+                    quick_format, progress_callback
+                )
+            elif self.system == "Darwin":
+                return self._format_macos(
+                    device, filesystem, label, partition_scheme,
+                    quick_format, progress_callback
+                )
             else:
-                logger.error(f"DiskFormatter: Unsupported OS: {self.system}")
-                self._update_progress(progress_callback, 0, f"Unsupported OS: {self.system}")
+                self._progress(progress_callback, 0, f"Unsupported OS: {self.system}")
                 return False, ""
-        except Exception as e:
-            logger.exception(f"DiskFormatter: Exception in format_disk: {str(e)}")
-            self._update_progress(progress_callback, 0, f"Error formatting disk: {str(e)}")
+        except Exception as exc:
+            logger.exception("DiskFormatter: format_disk exception")
+            self._progress(progress_callback, 0, f"Error formatting disk: {exc}")
             return False, ""
-    
+
+    # ------------------------------------------------------------------
+    # Windows
+    # ------------------------------------------------------------------
+
     def _format_windows(
         self,
         device: Dict[str, Any],
@@ -87,199 +96,164 @@ class DiskFormatter:
         label: str,
         partition_scheme: str,
         quick_format: bool,
-        progress_callback: Optional[Callable[[int, str], None]]
+        progress_callback: Optional[Callable[[int, str], None]],
     ) -> Tuple[bool, str]:
-        """Format a disk on Windows."""
-        disk_number = device.get('number')
-        if disk_number is None or disk_number < 0 or disk_number == -1:
-            self._update_progress(progress_callback, 0, "Error: Invalid device number")
+        disk_number = device.get("number", -1)
+        if disk_number is None or int(disk_number) < 0:
+            self._progress(progress_callback, 0, "Error: Invalid device number")
             return False, ""
 
+        # Privilege check
         try:
             import ctypes
-            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
-            if not is_admin:
-                self._update_progress(progress_callback, 0, "Error: Administrator privileges required")
+            if not ctypes.windll.shell32.IsUserAnAdmin():
+                self._progress(progress_callback, 0,
+                               "Error: Administrator privileges required")
                 return False, ""
         except Exception:
+            pass  # Non-Windows build environment; continue.
+
+        self._progress(progress_callback, 5, "Cleaning disk…")
+        if not self._windows_clean_disk(disk_number, progress_callback):
+            return False, ""
+        self._progress(progress_callback, 15, "Disk cleaned.")
+
+        self._progress(progress_callback, 20, f"Initialising {partition_scheme} partition table…")
+        if not self._windows_init_disk(disk_number, partition_scheme, progress_callback):
+            return False, ""
+        self._progress(progress_callback, 30, "Partition table created.")
+
+        self._progress(progress_callback, 35, "Creating and formatting partition…")
+        if not self._windows_create_partition(
+            disk_number, filesystem, label, quick_format, progress_callback
+        ):
+            return False, ""
+        self._progress(progress_callback, 75, "Partition formatted.")
+
+        drive_letter = self._windows_get_drive_letter(disk_number)
+        if drive_letter:
+            self._progress(progress_callback, 100,
+                           f"Done. Drive letter: {drive_letter}:")
+            return True, drive_letter
+        self._progress(progress_callback, 0, "Error: Could not determine drive letter.")
+        return False, ""
+
+    def _windows_clean_disk(
+        self, disk_number: int,
+        cb: Optional[Callable[[int, str], None]]
+    ) -> bool:
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Clear-Disk -Number {disk_number} -RemoveData -Confirm:$false"],
+                capture_output=True, text=True, timeout=60
+            )
+            if r.returncode == 0:
+                return True
+        except Exception:
             pass
+        # diskpart fallback
+        return self._diskpart(
+            f"select disk {disk_number}\nclean\nexit\n",
+            "clean disk", cb
+        )
 
+    def _windows_init_disk(
+        self, disk_number: int, scheme: str,
+        cb: Optional[Callable[[int, str], None]]
+    ) -> bool:
+        style = "MBR" if scheme.upper() == "MBR" else "GPT"
         try:
-            clean_cmd = [
-                "powershell",
-                "-Command",
-                f"Clear-Disk -Number {disk_number} -RemoveData -Confirm:$false"
-            ]
-            
-            result = subprocess.run(clean_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                try:
-                    script_path = os.path.join(os.environ.get('TEMP', '.'), 'diskpart_script.txt')
-                    with open(script_path, 'w') as f:
-                        f.write(f"select disk {disk_number}\n")
-                        f.write("clean\n")
-                        f.write("exit\n")
-                    
-                    diskpart_cmd = ["diskpart", "/s", script_path]
-                    subprocess.run(diskpart_cmd, capture_output=True, text=True, check=True)
-                    
-                    try:
-                        os.remove(script_path)
-                    except:
-                        pass
-                except Exception as e:
-                    self._update_progress(progress_callback, 0, f"Error cleaning disk: {str(e)}")
-                    return False, ""
-        except Exception as e:
-            self._update_progress(progress_callback, 0, f"Error cleaning disk: {str(e)}")
-            return False, ""
-            
-        self._update_progress(progress_callback, 15, "Disk cleaned successfully")
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Initialize-Disk -Number {disk_number} -PartitionStyle {style}"],
+                capture_output=True, text=True, timeout=60
+            )
+            if r.returncode == 0:
+                return True
+        except Exception:
+            pass
+        return self._diskpart(
+            f"select disk {disk_number}\nconvert {style.lower()}\nexit\n",
+            "initialize disk", cb
+        )
 
+    def _windows_create_partition(
+        self, disk_number: int, filesystem: str, label: str,
+        quick_format: bool,
+        cb: Optional[Callable[[int, str], None]]
+    ) -> bool:
+        fs_lower = filesystem.lower()
+        quick = "quick" if quick_format else ""
+        script = (
+            f"select disk {disk_number}\n"
+            "create partition primary\n"
+            "select partition 1\n"
+            "active\n"
+            f"format fs={fs_lower} label=\"{label}\" {quick}\n"
+            "assign\n"
+            "exit\n"
+        )
+        return self._diskpart(script, "create partition", cb)
+
+    def _windows_get_drive_letter(self, disk_number: int) -> str:
         try:
-            if partition_scheme.lower() == "mbr":
-                init_cmd = [
-                    "powershell",
-                    "-Command",
-                    f"Initialize-Disk -Number {disk_number} -PartitionStyle MBR"
-                ]
-            else:
-                init_cmd = [
-                    "powershell",
-                    "-Command",
-                    f"Initialize-Disk -Number {disk_number} -PartitionStyle GPT"
-                ]
-            
-            result = subprocess.run(init_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                try:
-                    script_path = os.path.join(os.environ.get('TEMP', '.'), 'diskpart_script.txt')
-                    with open(script_path, 'w') as f:
-                        f.write(f"select disk {disk_number}\n")
-                        f.write(f"convert {partition_scheme.lower()}\n")
-                        f.write("exit\n")
-                    
-                    diskpart_cmd = ["diskpart", "/s", script_path]
-                    subprocess.run(diskpart_cmd, capture_output=True, text=True, check=True)
-                    
-                    try:
-                        os.remove(script_path)
-                    except:
-                        pass
-                except Exception as e:
-                    self._update_progress(progress_callback, 0, f"Error initializing disk: {str(e)}")
-                    return False, ""
-        except Exception as e:
-            self._update_progress(progress_callback, 0, f"Error initializing disk: {str(e)}")
-            return False, ""
-            
-        self._update_progress(progress_callback, 25, f"Disk initialized with {partition_scheme} partition scheme")
-        
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Get-Partition -DiskNumber {disk_number} | "
+                 "Get-Volume | Select-Object -ExpandProperty DriveLetter"],
+                capture_output=True, text=True, timeout=15
+            )
+            letter = r.stdout.strip()
+            if letter:
+                return letter
+        except Exception:
+            pass
+        # Fallback: find any removable drive
+        for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+            try:
+                if os.path.exists(f"{letter}:\\"):
+                    r = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         f"(Get-WmiObject Win32_LogicalDisk "
+                         f"| Where-Object {{ $_.DeviceID -eq '{letter}:' }}).DriveType"],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if r.stdout.strip() == "2":
+                        return letter
+            except Exception:
+                continue
+        return ""
+
+    def _diskpart(
+        self, script: str, operation: str,
+        cb: Optional[Callable[[int, str], None]]
+    ) -> bool:
+        """Execute a diskpart script from a temp file."""
+        import tempfile
+        tmp = os.path.join(os.environ.get("TEMP", tempfile.gettempdir()),
+                           "sb_diskpart.txt")
         try:
-            if filesystem.upper() == "FAT32":
-                script_path = os.path.join(os.environ.get('TEMP', '.'), 'diskpart_script.txt')
-                with open(script_path, 'w') as f:
-                    f.write(f"select disk {disk_number}\n")
-                    f.write("create partition primary\n")
-                    f.write("select partition 1\n")
-                    f.write("active\n")
-                    f.write(f"format fs=fat32 label=\"{label}\" quick\n")
-                    f.write("assign\n")
-                    f.write("exit\n")
-                
-                diskpart_cmd = ["diskpart", "/s", script_path]
-                subprocess.run(diskpart_cmd, capture_output=True, text=True, check=True)
-                
-                try:
-                    os.remove(script_path)
-                except:
-                    pass
-            else:
-                format_option = "-Full" if not quick_format else ""
-                
-                create_partition_cmd = [
-                    "powershell",
-                    "-Command",
-                    f"New-Partition -DiskNumber {disk_number} -UseMaximumSize -IsActive | "
-                    f"Format-Volume -FileSystem {filesystem} {format_option} -NewFileSystemLabel '{label}' -Force | "
-                    f"Add-PartitionAccessPath -AssignDriveLetter"
-                ]
-                
-                result = subprocess.run(create_partition_cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    script_path = os.path.join(os.environ.get('TEMP', '.'), 'diskpart_script.txt')
-                    with open(script_path, 'w') as f:
-                        f.write(f"select disk {disk_number}\n")
-                        f.write("create partition primary\n")
-                        f.write("select partition 1\n")
-                        f.write("active\n")
-                        f.write(f"format fs={filesystem} label=\"{label}\" quick\n")
-                        f.write("assign\n")
-                        f.write("exit\n")
-                    
-                    diskpart_cmd = ["diskpart", "/s", script_path]
-                    subprocess.run(diskpart_cmd, capture_output=True, text=True, check=True)
-                    
-                    try:
-                        os.remove(script_path)
-                    except:
-                        pass
-        except Exception as e:
-            self._update_progress(progress_callback, 0, f"Error creating/formatting partition: {str(e)}")
-            return False, ""
-            
-        self._update_progress(progress_callback, 75, "Partition created and formatted")
-        
-        try:
-            get_drive_letter_cmd = [
-                "powershell",
-                "-Command",
-                f"Get-Partition -DiskNumber {disk_number} | Get-Volume | Select-Object -ExpandProperty DriveLetter"
-            ]
-            
-            result = subprocess.run(get_drive_letter_cmd, capture_output=True, text=True)
-            drive_letter = result.stdout.strip()
-            
-            if not drive_letter:
-                try:
-                    wmic_cmd = [
-                        "wmic", "logicaldisk", "where", "drivetype=2", "get", "deviceid", "/value"
-                    ]
-                    result = subprocess.run(wmic_cmd, capture_output=True, text=True)
-                    for line in result.stdout.splitlines():
-                        if line.startswith("DeviceID="):
-                            drive_letter = line.split("=")[1].strip()
-                            break
-                except:
-                    pass
-                
-                if not drive_letter:
-                    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
-                        try:
-                            if os.path.exists(f"{letter}:\\"):
-                                drive_type_cmd = [
-                                    "powershell",
-                                    "-Command",
-                                    f"(Get-WmiObject -Class Win32_LogicalDisk | Where-Object {{ $_.DeviceID -eq '{letter}:' }}).DriveType"
-                                ]
-                                result = subprocess.run(drive_type_cmd, capture_output=True, text=True)
-                                if result.stdout.strip() == "2":
-                                    drive_letter = letter
-                                    break
-                        except:
-                            continue
-            
-            if drive_letter:
-                self._update_progress(progress_callback, 100, f"Disk formatted successfully, assigned to {drive_letter}:")
-                return True, drive_letter
-            else:
-                self._update_progress(progress_callback, 0, "Error: Could not determine drive letter")
-                return False, ""
-                
-        except Exception as e:
-            self._update_progress(progress_callback, 0, f"Error getting drive letter: {str(e)}")
-            return False, ""
-    
+            with open(tmp, "w") as f:
+                f.write(script)
+            r = subprocess.run(
+                ["diskpart", "/s", tmp],
+                capture_output=True, text=True, timeout=120
+            )
+            return r.returncode == 0
+        except Exception as exc:
+            self._progress(cb, 0, f"Error during {operation}: {exc}")
+            return False
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    # ------------------------------------------------------------------
+    # Linux
+    # ------------------------------------------------------------------
+
     def _format_linux(
         self,
         device: Dict[str, Any],
@@ -287,130 +261,169 @@ class DiskFormatter:
         label: str,
         partition_scheme: str,
         quick_format: bool,
-        progress_callback: Optional[Callable[[int, str], None]]
+        progress_callback: Optional[Callable[[int, str], None]],
     ) -> Tuple[bool, str]:
-        """Format a disk on Linux."""
-        device_path = device.get('name')
-        if not device_path:
-            self._update_progress(progress_callback, 0, "Error: Invalid device path")
+        device_name = device.get("name", "")
+        if not device_name:
+            self._progress(progress_callback, 0, "Error: Invalid device path")
             return False, ""
-        
-        if not device_path.startswith('/dev/'):
-            device_path = f"/dev/{device_path}"
-        
-        self._update_progress(progress_callback, 5, "Preparing to format device...")
-        
-        try:
-            mount_check = subprocess.run(["mount"], capture_output=True, text=True)
-            if device_path in mount_check.stdout:
-                subprocess.run(["sudo", "umount", device_path + "*"], capture_output=True)
-        except Exception:
-            pass
-        
-        try:
-            if partition_scheme.upper() == "MBR":
-                subprocess.run(["sudo", "parted", "-s", device_path, "mklabel", "msdos"], check=True, capture_output=True)
-            else:
-                subprocess.run(["sudo", "parted", "-s", device_path, "mklabel", "gpt"], check=True, capture_output=True)
-            
-            self._update_progress(progress_callback, 20, f"Created {partition_scheme} partition table")
-        except subprocess.CalledProcessError as e:
-            self._update_progress(progress_callback, 0, f"Error creating partition table: {e.stderr}")
-            return False, ""
-        except Exception as e:
-            self._update_progress(progress_callback, 0, f"Error creating partition table: {str(e)}")
-            return False, ""
-        
+
+        dev = device_name if device_name.startswith("/dev/") else f"/dev/{device_name}"
+
+        self._progress(progress_callback, 5, "Unmounting existing partitions…")
+        self._linux_unmount_all(dev)
+
+        self._progress(progress_callback, 10, f"Creating {partition_scheme} partition table…")
+        scheme_arg = "msdos" if partition_scheme.upper() == "MBR" else "gpt"
         try:
             subprocess.run(
-                ["sudo", "parted", "-s", device_path, "mkpart", "primary", "0%", "100%"],
-                check=True, capture_output=True
+                ["sudo", "parted", "-s", dev, "mklabel", scheme_arg],
+                check=True, capture_output=True, timeout=30
             )
-            self._update_progress(progress_callback, 40, "Created partition")
-            
-            time.sleep(1)
-            
-            partition = f"{device_path}1"
-            
-            for _ in range(5):
-                if os.path.exists(partition):
-                    break
-                time.sleep(1)
-            
-            if not os.path.exists(partition):
-                if os.path.exists(f"{device_path}p1"):
-                    partition = f"{device_path}p1"
-                else:
-                    self._update_progress(progress_callback, 0, f"Error: Partition {partition} not found")
-                    return False, ""
-        except subprocess.CalledProcessError as e:
-            self._update_progress(progress_callback, 0, f"Error creating partition: {e.stderr}")
+        except subprocess.CalledProcessError as exc:
+            self._progress(progress_callback, 0,
+                           f"Error creating partition table: {exc.stderr}")
             return False, ""
-        except Exception as e:
-            self._update_progress(progress_callback, 0, f"Error creating partition: {str(e)}")
-            return False, ""
-        
+
+        self._progress(progress_callback, 25, "Creating primary partition…")
         try:
-            if filesystem.lower() in ["fat", "fat32", "vfat"]:
+            subprocess.run(
+                ["sudo", "parted", "-s", dev,
+                 "mkpart", "primary", "1MiB", "100%"],
+                check=True, capture_output=True, timeout=30
+            )
+        except subprocess.CalledProcessError as exc:
+            self._progress(progress_callback, 0,
+                           f"Error creating partition: {exc.stderr}")
+            return False, ""
+
+        # Wait for the partition node to appear
+        partition = self._wait_for_partition(dev)
+        if not partition:
+            self._progress(progress_callback, 0,
+                           "Error: Partition device node not found")
+            return False, ""
+
+        # Set boot flag for MBR
+        if scheme_arg == "msdos":
+            subprocess.run(
+                ["sudo", "parted", "-s", dev, "set", "1", "boot", "on"],
+                capture_output=True, timeout=15
+            )
+
+        self._progress(progress_callback, 50, f"Formatting {partition} as {filesystem}…")
+        if not self._linux_mkfs(partition, filesystem, label, quick_format,
+                                progress_callback):
+            return False, ""
+
+        self._progress(progress_callback, 80, "Mounting partition…")
+        mount_point = self._linux_mount(partition, filesystem)
+        if mount_point:
+            self._progress(progress_callback, 100,
+                           f"Done. Mounted at {mount_point}")
+            return True, mount_point
+
+        self._progress(progress_callback, 100,
+                       f"Formatted (unmounted). Partition: {partition}")
+        return True, partition
+
+    def _linux_unmount_all(self, dev: str) -> None:
+        try:
+            result = subprocess.run(
+                ["mount"], capture_output=True, text=True
+            )
+            for line in result.stdout.splitlines():
+                if dev in line:
+                    part = line.split()[0]
+                    subprocess.run(
+                        ["sudo", "umount", part],
+                        capture_output=True, timeout=10
+                    )
+        except Exception:
+            pass
+
+    def _wait_for_partition(self, dev: str, retries: int = 6) -> Optional[str]:
+        """Wait up to ~6 s for partition nodes to appear."""
+        candidates = [f"{dev}1", f"{dev}p1"]
+        for _ in range(retries):
+            for c in candidates:
+                if os.path.exists(c):
+                    return c
+            time.sleep(1)
+        return None
+
+    def _linux_mkfs(
+        self, partition: str, filesystem: str, label: str,
+        quick: bool,
+        cb: Optional[Callable[[int, str], None]]
+    ) -> bool:
+        fs = filesystem.lower()
+        try:
+            if fs in ("fat", "fat32", "vfat"):
                 cmd = ["sudo", "mkfs.vfat", "-F", "32"]
                 if label:
-                    cmd.extend(["-n", label])
+                    cmd += ["-n", label[:11]]   # FAT label max 11 chars
                 cmd.append(partition)
-                subprocess.run(cmd, check=True, capture_output=True)
-            elif filesystem.lower() == "ntfs":
+            elif fs == "ntfs":
                 cmd = ["sudo", "mkfs.ntfs"]
-                if quick_format:
+                if quick:
                     cmd.append("-f")
                 if label:
-                    cmd.extend(["-L", label])
+                    cmd += ["-L", label]
                 cmd.append(partition)
-                subprocess.run(cmd, check=True, capture_output=True)
-            elif filesystem.lower() == "exfat":
+            elif fs == "exfat":
                 cmd = ["sudo", "mkfs.exfat"]
                 if label:
-                    cmd.extend(["-n", label])
+                    cmd += ["-n", label]
                 cmd.append(partition)
-                subprocess.run(cmd, check=True, capture_output=True)
-            elif filesystem.lower().startswith("ext"):
-                cmd = [f"sudo", f"mkfs.{filesystem.lower()}"]
+            elif fs in ("ext2", "ext3", "ext4"):
+                cmd = ["sudo", f"mkfs.{fs}"]
                 if label:
-                    cmd.extend(["-L", label])
+                    cmd += ["-L", label]
                 cmd.append(partition)
-                subprocess.run(cmd, check=True, capture_output=True)
+            elif fs == "udf":
+                cmd = ["sudo", "mkudffs"]
+                if label:
+                    cmd += ["--label", label]
+                cmd.append(partition)
             else:
-                self._update_progress(progress_callback, 0, f"Unsupported filesystem: {filesystem}")
-                return False, ""
-            
-            self._update_progress(progress_callback, 60, f"Formatted partition with {filesystem}")
-        except subprocess.CalledProcessError as e:
-            self._update_progress(progress_callback, 0, f"Error formatting partition: {e.stderr}")
-            return False, ""
-        except Exception as e:
-            self._update_progress(progress_callback, 0, f"Error formatting partition: {str(e)}")
-            return False, ""
-        
-        mount_point = ""
+                self._progress(cb, 0, f"Unsupported filesystem: {filesystem}")
+                return False
+
+            subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+            return True
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="replace") if exc.stderr else str(exc)
+            self._progress(cb, 0, f"mkfs error: {stderr}")
+            return False
+        except Exception as exc:
+            self._progress(cb, 0, f"mkfs error: {exc}")
+            return False
+
+    def _linux_mount(self, partition: str, filesystem: str) -> str:
+        import tempfile
+        mount_dir = tempfile.mkdtemp(prefix="smartboot_fmt_")
+        fs = filesystem.lower()
         try:
-            mount_dir = f"/tmp/smartboot_mount_{int(time.time())}"
-            os.makedirs(mount_dir, exist_ok=True)
-            
-            mount_cmd = ["sudo", "mount"]
-            if filesystem.lower() in ["ntfs", "exfat"]:
-                mount_cmd.extend(["-t", filesystem.lower()])
-            mount_cmd.extend([partition, mount_dir])
-            
-            subprocess.run(mount_cmd, check=True, capture_output=True)
-            mount_point = mount_dir
-            
-            self._update_progress(progress_callback, 80, f"Mounted partition at {mount_point}")
-        except subprocess.CalledProcessError as e:
-            self._update_progress(progress_callback, 70, f"Warning: Could not mount partition: {e.stderr}")
-        except Exception as e:
-            self._update_progress(progress_callback, 70, f"Warning: Could not mount partition: {str(e)}")
-        
-        self._update_progress(progress_callback, 100, f"Disk formatted successfully with {filesystem}")
-        return True, mount_point or partition
-    
+            cmd = ["sudo", "mount"]
+            if fs in ("ntfs",):
+                cmd += ["-t", "ntfs-3g"]
+            elif fs == "exfat":
+                cmd += ["-t", "exfat"]
+            cmd += [partition, mount_dir]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+            return mount_dir
+        except Exception:
+            try:
+                os.rmdir(mount_dir)
+            except OSError:
+                pass
+            return ""
+
+    # ------------------------------------------------------------------
+    # macOS
+    # ------------------------------------------------------------------
+
     def _format_macos(
         self,
         device: Dict[str, Any],
@@ -418,80 +431,62 @@ class DiskFormatter:
         label: str,
         partition_scheme: str,
         quick_format: bool,
-        progress_callback: Optional[Callable[[int, str], None]]
+        progress_callback: Optional[Callable[[int, str], None]],
     ) -> Tuple[bool, str]:
-        """Format a disk on macOS."""
-        device_path = device.get('name')
-        if not device_path:
-            self._update_progress(progress_callback, 0, "Error: Invalid device path")
+        dev_name = device.get("name", "")
+        if not dev_name:
+            self._progress(progress_callback, 0, "Error: Invalid device path")
             return False, ""
-        
-        if not device_path.startswith('/dev/'):
-            device_path = f"/dev/{device_path}"
-        
-        self._update_progress(progress_callback, 5, "Preparing to format device...")
-        
+        dev = dev_name if dev_name.startswith("/dev/") else f"/dev/{dev_name}"
+
+        self._progress(progress_callback, 10, "Unmounting disk…")
+        subprocess.run(["diskutil", "unmountDisk", dev], capture_output=True)
+
+        fmt_map = {
+            "FAT32":  "MS-DOS FAT32",
+            "ExFAT":  "ExFAT",
+            "NTFS":   "NTFS",
+            "HFS+":   "HFS+",
+            "APFS":   "APFS",
+        }
+        diskutil_fmt = fmt_map.get(filesystem, "MS-DOS FAT32")
+        scheme = "MBR" if partition_scheme.upper() == "MBR" else "GPT"
+
+        self._progress(progress_callback, 30,
+                       f"Erasing disk as {diskutil_fmt} ({scheme})…")
         try:
-            subprocess.run(["diskutil", "unmountDisk", device_path], capture_output=True)
-        except Exception:
-            pass
-        
-        try:
-            format_map = {
-                "FAT32": "MS-DOS FAT32",
-                "ExFAT": "ExFAT",
-                "NTFS": "NTFS",
-                "HFS+": "HFS+",
-                "APFS": "APFS"
-            }
-            
-            diskutil_format = format_map.get(filesystem, "MS-DOS FAT32")
-            
-            scheme = "MBR" if partition_scheme.upper() == "MBR" else "GPT"
-            
-            cmd = [
-                "diskutil", "eraseDisk", 
-                diskutil_format,
-                label or "BOOTABLE",
-                scheme,
-                device_path
-            ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
+            result = subprocess.run(
+                ["diskutil", "eraseDisk", diskutil_fmt,
+                 label or "BOOTABLE", scheme, dev],
+                capture_output=True, text=True, timeout=300
+            )
             if result.returncode != 0:
-                self._update_progress(progress_callback, 0, f"Error formatting disk: {result.stderr}")
+                self._progress(progress_callback, 0,
+                               f"Error: {result.stderr.strip()}")
                 return False, ""
-            
+
             mount_point = ""
             for line in result.stdout.splitlines():
-                if "Volume name" in line and "mounted at" in line:
-                    mount_point = line.split("mounted at")[-1].strip()
+                if "mounted at" in line.lower():
+                    mount_point = line.split("mounted at", 1)[-1].strip()
                     break
-            
-            self._update_progress(progress_callback, 100, f"Disk formatted successfully with {filesystem}")
+
+            self._progress(progress_callback, 100, "Done.")
             return True, mount_point or f"/Volumes/{label}"
-        except subprocess.CalledProcessError as e:
-            self._update_progress(progress_callback, 0, f"Error formatting disk: {e.stderr}")
+        except Exception as exc:
+            self._progress(progress_callback, 0, f"Error: {exc}")
             return False, ""
-        except Exception as e:
-            self._update_progress(progress_callback, 0, f"Error formatting disk: {str(e)}")
-            return False, ""
-    
-    def _update_progress(
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
+
+    def _progress(
         self,
         callback: Optional[Callable[[int, str], None]],
         percent: int,
-        message: str
-    ):
-        """
-        Update progress through the callback if provided.
-        
-        Args:
-            callback (Optional[Callable[[int, str], None]]): Progress callback
-            percent (int): Progress percentage (0-100)
-            message (str): Progress message
-        """
+        message: str,
+    ) -> None:
+        logger.debug(f"DiskFormatter: {percent}% – {message}")
         if callback:
             callback(percent, message)
-        print(f"Progress: {percent}% - {message}")

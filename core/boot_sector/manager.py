@@ -1,14 +1,14 @@
 """
 Boot Sector Manager module for SmartBoot
 
-This module provides the main interface for writing boot sectors to USB devices.
-It delegates platform-specific operations to specialized modules.
+Coordinates boot sector writing by delegating to the correct
+platform-specific implementation (Windows / Linux / macOS).
 """
 
 import os
 import platform
 import tempfile
-from typing import Dict, Any, Callable, Optional, List
+from typing import Any, Callable, Dict, Optional
 
 from utils.logger import get_logger
 from .base import BaseBootSector
@@ -21,90 +21,157 @@ logger = get_logger()
 
 class BootSectorManager:
     """
-    Manager class for writing boot sectors to USB devices.
-    Handles platform detection and delegates to appropriate implementation.
+    Selects and drives the platform-appropriate boot-sector writer.
+
+    Supported boot types (options['boot_type']):
+        bios     – Legacy BIOS/MBR boot
+        uefi     – UEFI-only boot
+        dual     – Both BIOS and UEFI (tries both, succeeds if either works)
+        freedos  – FreeDOS boot (BIOS only)
     """
-    
-    def __init__(self):
-        """Initialize the Boot Sector Manager."""
+
+    def __init__(self) -> None:
         self.system = platform.system()
-        self.resource_dir = os.path.join(tempfile.gettempdir(), "smartboot_resources")
+        self.resource_dir = os.path.join(
+            tempfile.gettempdir(), "smartboot_resources"
+        )
         os.makedirs(self.resource_dir, exist_ok=True)
-        
-        if self.system == 'Windows':
-            self._impl = WindowsBootSector(self.resource_dir)
-        elif self.system == 'Linux':
-            self._impl = LinuxBootSector(self.resource_dir)
-        elif self.system == 'Darwin':
-            self._impl = MacOSBootSector(self.resource_dir)
-        else:
-            self._impl = BaseBootSector(self.resource_dir)
-            
-        logger.debug(f"BootSectorManager: Initialized for {self.system}")
-    
+
+        impl_map = {
+            "Windows": WindowsBootSector,
+            "Linux":   LinuxBootSector,
+            "Darwin":  MacOSBootSector,
+        }
+        cls = impl_map.get(self.system, BaseBootSector)
+        self._impl: BaseBootSector = cls(self.resource_dir)
+        logger.debug(f"BootSectorManager: using {cls.__name__} on {self.system}")
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def write_boot_sector(
         self,
         device: Dict[str, Any],
         options: Dict[str, Any],
-        progress_callback: Optional[Callable[[int, str], None]] = None
+        progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> bool:
         """
-        Write boot sector to the USB device based on selected options.
-        
+        Write the appropriate boot sector to *device* according to *options*.
+
         Args:
-            device (Dict[str, Any]): Device information
-            options (Dict[str, Any]): Boot options
-            progress_callback (Optional[Callable[[int, str], None]]): Callback for progress updates
-            
+            device:            Device info dict (name, number, drive_letter, …).
+            options:           Must contain 'boot_type'; may contain 'iso_path',
+                               'iso_type', 'partition_scheme'.
+            progress_callback: Called with (percent: int, message: str).
+
         Returns:
-            bool: True if successful, False otherwise
+            True on success (or partial success for dual mode).
         """
         try:
-            if 'error' in device:
-                self._update(progress_callback, 0, f"Error: {device['error']}")
+            if "error" in device:
+                self._emit(progress_callback, 0,
+                           f"Error: {device['error']}")
                 return False
-            
+
             if not self._impl.check_admin_privileges():
-                self._update(progress_callback, 0, "Error: Administrator/root privileges required. Please run SmartBoot with elevated privileges.")
+                self._emit(
+                    progress_callback, 0,
+                    "Error: Administrator / root privileges are required. "
+                    "Please restart SmartBoot with elevated privileges."
+                )
                 return False
-            
-            boot_type = options.get('boot_type', 'bios').lower()
-            
-            self._update(progress_callback, 5, f"Preparing to write {boot_type} boot sector...")
-            
-            if boot_type == 'freedos':
-                return self._impl.write_freedos_boot(device, options, progress_callback)
-            elif boot_type == 'uefi':
-                return self._impl.write_uefi_boot(device, options, progress_callback)
-            elif boot_type == 'dual':
-                bios_success = self._impl.write_bios_boot(device, options, progress_callback)
-                if not bios_success:
-                    self._update(progress_callback, 50, "Warning: BIOS boot sector failed, trying UEFI...")
-                uefi_success = self._impl.write_uefi_boot(device, options, progress_callback)
-                if not uefi_success:
-                    self._update(progress_callback, 75, "Warning: UEFI boot sector failed")
-                return bios_success or uefi_success
-            else:
-                return self._impl.write_bios_boot(device, options, progress_callback)
-        except Exception as e:
-            logger.error(f"Error writing boot sector: {str(e)}")
-            self._update(progress_callback, 0, f"Error writing boot sector: {str(e)}")
+
+            boot_type = options.get("boot_type", "bios").lower().strip()
+            self._emit(progress_callback, 5,
+                       f"Preparing {boot_type.upper()} boot sector…")
+
+            if boot_type == "freedos":
+                return self._impl.write_freedos_boot(
+                    device, options, progress_callback
+                )
+
+            if boot_type == "uefi":
+                return self._impl.write_uefi_boot(
+                    device, options, progress_callback
+                )
+
+            if boot_type == "dual":
+                return self._write_dual(device, options, progress_callback)
+
+            # Default: bios
+            return self._impl.write_bios_boot(
+                device, options, progress_callback
+            )
+
+        except Exception as exc:
+            logger.exception("BootSectorManager: unexpected error")
+            self._emit(progress_callback, 0,
+                       f"Error writing boot sector: {exc}")
             return False
-    
-    def _update(
-        self, 
-        progress_callback: Optional[Callable[[int, str], None]], 
-        progress: int, 
-        message: str
+
+    # ------------------------------------------------------------------
+    # Dual (BIOS + UEFI)
+    # ------------------------------------------------------------------
+
+    def _write_dual(
+        self,
+        device: Dict[str, Any],
+        options: Dict[str, Any],
+        progress_callback: Optional[Callable[[int, str], None]],
+    ) -> bool:
+        """
+        Attempt both BIOS and UEFI boot sector installation.
+        Succeeds if at least one mode works.
+        """
+        def sub_cb(pct: int, msg: str) -> None:
+            # Re-scale sub-operations into distinct halves
+            if progress_callback:
+                progress_callback(pct, msg)
+
+        self._emit(progress_callback, 5, "Installing BIOS boot sector…")
+        bios_ok = False
+        try:
+            bios_ok = self._impl.write_bios_boot(device, options, sub_cb)
+        except Exception as exc:
+            logger.warning(f"Dual/BIOS failed: {exc}")
+            self._emit(progress_callback, 48,
+                       f"Warning: BIOS boot sector failed: {exc}")
+
+        self._emit(progress_callback, 50, "Installing UEFI boot sector…")
+        uefi_ok = False
+        try:
+            uefi_ok = self._impl.write_uefi_boot(device, options, sub_cb)
+        except Exception as exc:
+            logger.warning(f"Dual/UEFI failed: {exc}")
+            self._emit(progress_callback, 98,
+                       f"Warning: UEFI boot sector failed: {exc}")
+
+        if bios_ok and uefi_ok:
+            self._emit(progress_callback, 100,
+                       "Dual boot sectors installed (BIOS + UEFI)")
+        elif bios_ok:
+            self._emit(progress_callback, 100,
+                       "Dual boot: BIOS OK, UEFI failed — BIOS-only boot")
+        elif uefi_ok:
+            self._emit(progress_callback, 100,
+                       "Dual boot: UEFI OK, BIOS failed — UEFI-only boot")
+        else:
+            self._emit(progress_callback, 0,
+                       "Dual boot: both BIOS and UEFI installation failed")
+
+        return bios_ok or uefi_ok
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _emit(
+        self,
+        cb: Optional[Callable[[int, str], None]],
+        pct: int,
+        msg: str,
     ) -> None:
-        """
-        Update progress and log messages.
-        
-        Args:
-            progress_callback: Function to call with progress updates
-            progress: Progress percentage (0-100)
-            message: Progress message
-        """
-        logger.debug(f"Boot sector progress: {progress}% - {message}")
-        if progress_callback:
-            progress_callback(progress, message)
+        logger.debug(f"BootSectorManager {pct}%: {msg}")
+        if cb:
+            cb(pct, msg)
