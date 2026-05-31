@@ -319,12 +319,21 @@ class MainWindow(QMainWindow):
 
         boot_id = self.boot_group.checkedId() if hasattr(self, "boot_group") else 0
 
+        # Get platform-specific supported filesystems
+        all_supported = self.formatter.get_supported_filesystems()
+
         if boot_id == 3:                        # FreeDOS
-            options = ["FAT32", "FAT"]
+            # FreeDOS only works with FAT filesystems
+            options = [fs for fs in all_supported if fs.upper() in ["FAT", "FAT32"]]
         elif boot_id in (1, 2):                 # UEFI / Dual
-            options = ["FAT32", "NTFS", "exFAT"]
+            # UEFI works best with FAT32, but also supports NTFS/exFAT
+            options = [fs for fs in all_supported if fs.upper() in ["FAT32", "NTFS", "EXFAT"]]
         else:                                   # BIOS
-            options = ["FAT32", "NTFS", "exFAT", "UDF"]
+            # BIOS supports most filesystems
+            options = all_supported
+
+        # Sort options for consistency
+        options = sorted(options, key=lambda x: x.upper())
 
         self.fs_combo.addItems(options)
         idx = self.fs_combo.findText(current)
