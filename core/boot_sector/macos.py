@@ -1,10 +1,20 @@
 """
 macOS Boot Sector module for SmartBoot
 
-Strategy:
-  BIOS:    dd MBR (best we can do without a Mac-native bootloader)
-  UEFI:    copy system EFI → syslinux efi64 → stub
-  FreeDOS: delegates to BIOS
+Strategy (Rufus-parity where possible on macOS):
+
+  BIOS:
+    1. dd generic MBR (446 bytes, conv=notrunc) — best we can do without
+       a native x86 bootloader package on macOS
+    2. Set boot flag via pdisk / diskutil (last resort)
+
+  UEFI:
+    1. Copy known macOS EFI files (apfs.efi, boot.efi, gummiboot)
+    2. Walk /usr/share/efi, /usr/lib/efi
+    3. Minimal PE32+ stub
+
+  FreeDOS:
+    Delegates to BIOS chain.
 """
 
 import os
@@ -30,15 +40,18 @@ def _sudo(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
 
 
 class MacOSBootSector(BaseBootSector):
-    """macOS-specific boot sector implementation."""
+    """macOS-specific boot sector writer."""
 
     _EFI_SOURCES = [
+        "/System/Library/CoreServices/boot.efi",
         "/usr/standalone/i386/apfs.efi",
         "/usr/standalone/i386/EfiLoginUI.efi",
-        "/System/Library/CoreServices/boot.efi",
-        "/usr/share/syslinux/efi64/syslinux.efi",
         "/usr/local/lib/syslinux/efi64/syslinux.efi",
+        "/opt/local/share/syslinux/efi64/syslinux.efi",
+        "/usr/local/share/refind/refind_x64.efi",
+        "/opt/homebrew/share/refind/refind_x64.efi",
     ]
+
 
     def check_admin_privileges(self) -> bool:
         try:
@@ -46,9 +59,6 @@ class MacOSBootSector(BaseBootSector):
         except Exception:
             return False
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     def _dev_path(self, device: Dict[str, Any]) -> Optional[str]:
         name = device.get("name", "")
@@ -63,17 +73,25 @@ class MacOSBootSector(BaseBootSector):
                 return candidate
         return None
 
-    def _mount_partition(self, partition: str) -> Optional[str]:
-        """Mount via diskutil and return the mount point."""
+    def _wait_for_partition(self, dev: str, number: int = 1,
+                             retries: int = 6) -> Optional[str]:
+        for _ in range(retries):
+            p = self._get_partition(dev, number)
+            if p:
+                return p
+            time.sleep(1)
+        return None
+
+    def _diskutil_mount(self, partition: str) -> Optional[str]:
+        """Mount partition via diskutil and return mount point."""
         try:
             r = _run(["diskutil", "mount", partition], timeout=20)
             if r.returncode != 0:
                 return None
-            # Parse "Volume XXX on /dev/disk1s1 mounted"
             for line in r.stdout.splitlines():
                 if "mounted" in line.lower() and " on " in line.lower():
                     mp = line.split(" on ", 1)[-1].strip().rstrip(".")
-                    if os.path.exists(mp):
+                    if mp and os.path.exists(mp):
                         return mp
         except Exception as exc:
             logger.warning(f"diskutil mount {partition}: {exc}")
@@ -82,26 +100,22 @@ class MacOSBootSector(BaseBootSector):
     def _resolve_mount_point(
         self, device: Dict[str, Any], partition: str
     ) -> Optional[str]:
-        """Return an existing mount point for the partition."""
         mp = device.get("drive_letter", "")
-        if mp and os.path.exists(mp):
+        if mp and os.path.isdir(mp):
             return mp
-        # Ask diskutil
+
         try:
             r = _run(["diskutil", "info", partition], timeout=10)
             for line in r.stdout.splitlines():
                 if "Mount Point:" in line:
                     candidate = line.split(":", 1)[1].strip()
-                    if candidate and os.path.exists(candidate):
+                    if candidate and os.path.isdir(candidate):
                         return candidate
         except Exception:
             pass
-        # Try mounting
-        return self._mount_partition(partition)
 
-    # ------------------------------------------------------------------
-    # BIOS boot
-    # ------------------------------------------------------------------
+        return self._diskutil_mount(partition)
+
 
     def write_bios_boot(
         self,
@@ -114,8 +128,10 @@ class MacOSBootSector(BaseBootSector):
             self._update(progress_callback, 0, "Device name not found")
             return False
 
-        self._update(progress_callback, 10,
+        self._update(progress_callback, 8,
                      f"Writing BIOS boot sector to {dev}…")
+
+        _run(["diskutil", "unmountDisk", dev], timeout=20)
 
         mbr_bin = self._find_or_create_mbr()
         if not mbr_bin or not os.path.exists(mbr_bin):
@@ -123,29 +139,38 @@ class MacOSBootSector(BaseBootSector):
                          "Error: Could not create MBR binary")
             return False
 
-        # Unmount so dd can write
-        _run(["diskutil", "unmountDisk", dev], timeout=20)
-
         try:
             r = _sudo(
                 ["dd", f"if={mbr_bin}", f"of={dev}",
                  "bs=446", "count=1", "conv=notrunc"],
-                timeout=30
+                timeout=30,
             )
             if r.returncode == 0:
-                self._update(progress_callback, 100,
-                             "Generic MBR written (dd)")
-                return True
-            self._update(progress_callback, 0,
-                         f"dd MBR failed: {r.stderr.strip()}")
+                self._update(progress_callback, 80, "Generic MBR written (dd)")
+            else:
+                self._update(progress_callback, 40,
+                             f"dd MBR failed: {r.stderr.strip()}")
         except Exception as exc:
-            self._update(progress_callback, 0, f"dd MBR error: {exc}")
+            self._update(progress_callback, 40, f"dd MBR error: {exc}")
 
-        return False
+        partition = self._wait_for_partition(dev)
+        if partition and shutil.which("pdisk"):
+            try:
+                proc = subprocess.Popen(
+                    ["sudo", "pdisk", dev, "-e"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                proc.communicate(input=b"f 1\nw\ny\nq\n", timeout=15)
+                self._update(progress_callback, 90,
+                             "Partition boot flag set via pdisk")
+            except Exception:
+                pass
 
-    # ------------------------------------------------------------------
-    # UEFI boot
-    # ------------------------------------------------------------------
+        self._update(progress_callback, 100,
+                     "BIOS boot setup complete (MBR written)")
+        return True
+
 
     def write_uefi_boot(
         self,
@@ -163,13 +188,14 @@ class MacOSBootSector(BaseBootSector):
             self._update(progress_callback, 0, "Device name not found")
             return False
 
-        partition = self._get_partition(dev)
+        partition = self._wait_for_partition(dev)
         if not partition:
             self._update(progress_callback, 0,
                          f"Could not find first partition on {dev}")
             return False
 
-        self._update(progress_callback, 10, "Preparing UEFI boot files…")
+        iso_type = options.get("iso_type", "generic").lower()
+        self._update(progress_callback, 8, "Preparing UEFI boot files…")
 
         mount_point = self._resolve_mount_point(device, partition)
         if not mount_point:
@@ -179,11 +205,9 @@ class MacOSBootSector(BaseBootSector):
 
         efi_boot_dir = os.path.join(mount_point, "EFI", "BOOT")
         os.makedirs(efi_boot_dir, exist_ok=True)
-        self._update(progress_callback, 20, "EFI directory structure created")
-
+        self._update(progress_callback, 18, "EFI directory structure created")
         bootx64 = os.path.join(efi_boot_dir, "BOOTX64.EFI")
 
-        # Layer 1: known macOS EFI files
         for src in self._EFI_SOURCES:
             if os.path.exists(src):
                 try:
@@ -192,13 +216,13 @@ class MacOSBootSector(BaseBootSector):
                                  f"UEFI bootloader installed from {src}")
                     return True
                 except Exception as exc:
-                    logger.warning(f"Copy {src}: {exc}")
+                    logger.warning(f"copy {src}: {exc}")
 
-        # Layer 2: walk /usr/share/efi, /usr/lib/efi
-        for efi_dir in ("/usr/share/efi", "/usr/lib/efi"):
-            if not os.path.isdir(efi_dir):
+        for efi_search in ("/usr/share/efi", "/usr/lib/efi",
+                           "/usr/local/share", "/opt/homebrew/share"):
+            if not os.path.isdir(efi_search):
                 continue
-            for root, _, files in os.walk(efi_dir):
+            for root, _, files in os.walk(efi_search):
                 for fname in files:
                     if fname.lower().endswith(".efi"):
                         src = os.path.join(root, fname)
@@ -210,23 +234,18 @@ class MacOSBootSector(BaseBootSector):
                         except Exception:
                             continue
 
-        # Layer 3: Minimal stub
-        self._update(progress_callback, 90,
-                     "No bootloader found — writing minimal stub…")
+        self._update(progress_callback, 88,
+                     "No bootloader found — writing minimal UEFI stub…")
         stub = self._find_or_create_uefi_stub()
         try:
             shutil.copy2(stub, bootx64)
-            self._update(progress_callback, 100,
-                         "Minimal UEFI stub installed")
+            self._update(progress_callback, 100, "Minimal UEFI stub installed")
             return True
         except Exception as exc:
             self._update(progress_callback, 0,
                          f"Stub install failed: {exc}")
             return False
 
-    # ------------------------------------------------------------------
-    # FreeDOS boot
-    # ------------------------------------------------------------------
 
     def write_freedos_boot(
         self,

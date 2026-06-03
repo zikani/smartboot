@@ -7,7 +7,8 @@ Handles ISO file operations, type detection, and validation.
 import os
 import subprocess
 import platform
-from typing import Dict, Any, Optional
+import json
+from typing import Dict, Any, Optional, List
 
 from utils.logger import default_logger as logger
 
@@ -15,7 +16,6 @@ from utils.logger import default_logger as logger
 class ISOManager:
     """Manages ISO files: information retrieval and validation."""
 
-    # Ordered list of (keyword-list, type-label) pairs for filename heuristics.
     _FILENAME_RULES = [
         (["windows", "win10", "win11", "win7", "win8",
           "microsoft", "server", "enterprise", "professional"], "Windows"),
@@ -29,7 +29,6 @@ class ISOManager:
         (["freedos", "msdos", "ms-dos", "dos"], "FreeDOS"),
     ]
 
-    # Directories/files inside the mounted ISO that identify its type.
     _CONTENT_SIGNATURES: Dict[str, list] = {
         "Windows": [
             ("sources", "install.wim"),
@@ -55,10 +54,18 @@ class ISOManager:
     def __init__(self) -> None:
         logger.debug("ISOManager: Initialising.")
         self.system = platform.system()
+        self._history_file = self._get_history_file_path()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def _get_history_file_path(self) -> str:
+        """Get the path to the ISO history JSON file."""
+        if self.system == "Windows":
+            base_dir = os.environ.get("APPDATA", "")
+            return os.path.join(base_dir, "SmartBoot", "iso_history.json")
+        elif self.system == "Darwin":
+            return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "SmartBoot", "iso_history.json")
+        else:
+            return os.path.join(os.path.expanduser("~"), ".smartboot", "iso_history.json")
+
 
     def get_iso_info(self, iso_path: str) -> Dict[str, Any]:
         """
@@ -112,11 +119,9 @@ class ISOManager:
                 logger.warning("ISOManager: file too small")
                 return False
 
-            # Check ISO 9660 magic at offset 0x8001
             if self._check_iso9660_magic(iso_path):
                 return True
 
-            # Platform content checks
             if self.system in ("Linux", "Darwin"):
                 result = subprocess.run(
                     ["file", "-b", iso_path],
@@ -129,34 +134,74 @@ class ISOManager:
             elif self.system == "Windows":
                 return self._validate_windows_mount(iso_path)
 
-            # Generous fallback: if > 100 MB assume valid
             return size > 100 * 1024 * 1024
 
         except Exception as exc:
             logger.error(f"ISOManager: validate_iso error: {exc}")
             return False
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    def get_history(self) -> List[Dict[str, Any]]:
+        """Return the list of recently used ISO files."""
+        try:
+            if os.path.exists(self._history_file):
+                with open(self._history_file, 'r') as f:
+                    return json.load(f)
+        except Exception as exc:
+            logger.warning(f"ISOManager: failed to load history: {exc}")
+        return []
+
+    def clear_history(self) -> None:
+        """Clear the ISO history."""
+        try:
+            if os.path.exists(self._history_file):
+                os.remove(self._history_file)
+            logger.debug("ISOManager: history cleared")
+        except Exception as exc:
+            logger.warning(f"ISOManager: failed to clear history: {exc}")
+
+    def add_to_history(self, iso_path: str) -> None:
+        """Add an ISO to the recent history."""
+        if not os.path.exists(iso_path):
+            return
+
+        try:
+            history = self.get_history()
+            
+            history = [h for h in history if h.get("path") != iso_path]
+            
+            entry = {
+                "path": iso_path,
+                "filename": os.path.basename(iso_path),
+                "timestamp": int(os.path.getmtime(iso_path))
+            }
+            history.insert(0, entry)
+            
+            history = history[:20]
+            
+            os.makedirs(os.path.dirname(self._history_file), exist_ok=True)
+            
+            with open(self._history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+            
+            logger.debug(f"ISOManager: added to history: {iso_path}")
+        except Exception as exc:
+            logger.warning(f"ISOManager: failed to add to history: {exc}")
+
 
     def _determine_iso_type(self, iso_path: str) -> str:
         """Best-effort ISO type detection."""
         filename = os.path.basename(iso_path).lower()
 
-        # 1. Filename heuristic
         for keywords, label in self._FILENAME_RULES:
             if any(kw in filename for kw in keywords):
                 logger.debug(f"ISOManager: type={label} (filename)")
                 return label
 
-        # 2. Content-based detection
         detected = self._detect_by_content(iso_path)
         if detected:
             logger.debug(f"ISOManager: type={detected} (content)")
             return detected
 
-        # 3. Size heuristic
         size_gb = os.path.getsize(iso_path) / (1024 ** 3)
         if size_gb > 8.0:
             return "Windows (likely)"

@@ -1,8 +1,12 @@
 """
 Boot Sector Manager module for SmartBoot
 
-Coordinates boot sector writing by delegating to the correct
-platform-specific implementation (Windows / Linux / macOS).
+Responsibilities:
+  - Select the platform-appropriate implementation at runtime
+  - Validate preconditions (admin, device sanity)
+  - Dispatch to write_bios_boot / write_uefi_boot / write_freedos_boot
+  - Handle "dual" mode (BIOS + UEFI, succeed if at least one works)
+  - Unified progress scaling so sub-callbacks don't overlap
 """
 
 import os
@@ -11,27 +15,27 @@ import tempfile
 from typing import Any, Callable, Dict, Optional
 
 from utils.logger import get_logger
-from .base import BaseBootSector
+from .base    import BaseBootSector
 from .windows import WindowsBootSector
-from .linux import LinuxBootSector
-from .macos import MacOSBootSector
+from .linux   import LinuxBootSector
+from .macos   import MacOSBootSector
 
 logger = get_logger()
 
 
 class BootSectorManager:
     """
-    Selects and drives the platform-appropriate boot-sector writer.
+    Platform-agnostic boot-sector orchestrator.
 
     Supported boot types (options['boot_type']):
-        bios     – Legacy BIOS/MBR boot
+        bios     – Legacy BIOS / MBR boot
         uefi     – UEFI-only boot
-        dual     – Both BIOS and UEFI (tries both, succeeds if either works)
-        freedos  – FreeDOS boot (BIOS only)
+        dual     – Both BIOS and UEFI (succeeds if either works)
+        freedos  – FreeDOS BIOS boot
     """
 
     def __init__(self) -> None:
-        self.system = platform.system()
+        self.system       = platform.system()
         self.resource_dir = os.path.join(
             tempfile.gettempdir(), "smartboot_resources"
         )
@@ -44,11 +48,10 @@ class BootSectorManager:
         }
         cls = impl_map.get(self.system, BaseBootSector)
         self._impl: BaseBootSector = cls(self.resource_dir)
-        logger.debug(f"BootSectorManager: using {cls.__name__} on {self.system}")
+        logger.debug(
+            f"BootSectorManager: using {cls.__name__} on {self.system}"
+        )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def write_boot_sector(
         self,
@@ -83,23 +86,20 @@ class BootSectorManager:
                 return False
 
             boot_type = options.get("boot_type", "bios").lower().strip()
-            self._emit(progress_callback, 5,
+            self._emit(progress_callback, 2,
                        f"Preparing {boot_type.upper()} boot sector…")
 
             if boot_type == "freedos":
                 return self._impl.write_freedos_boot(
                     device, options, progress_callback
                 )
-
             if boot_type == "uefi":
                 return self._impl.write_uefi_boot(
                     device, options, progress_callback
                 )
-
             if boot_type == "dual":
                 return self._write_dual(device, options, progress_callback)
 
-            # Default: bios
             return self._impl.write_bios_boot(
                 device, options, progress_callback
             )
@@ -110,9 +110,6 @@ class BootSectorManager:
                        f"Error writing boot sector: {exc}")
             return False
 
-    # ------------------------------------------------------------------
-    # Dual (BIOS + UEFI)
-    # ------------------------------------------------------------------
 
     def _write_dual(
         self,
@@ -121,30 +118,37 @@ class BootSectorManager:
         progress_callback: Optional[Callable[[int, str], None]],
     ) -> bool:
         """
-        Attempt both BIOS and UEFI boot sector installation.
-        Succeeds if at least one mode works.
+        Install BIOS and UEFI boot sectors sequentially.
+        Progress is split: BIOS gets 0-48 %, UEFI gets 50-98 %.
+        Succeeds if at least one mode completes successfully.
         """
-        def sub_cb(pct: int, msg: str) -> None:
-            # Re-scale sub-operations into distinct halves
-            if progress_callback:
-                progress_callback(pct, msg)
 
-        self._emit(progress_callback, 5, "Installing BIOS boot sector…")
+        def bios_cb(pct: int, msg: str) -> None:
+            mapped = int(pct * 0.48)
+            if progress_callback:
+                progress_callback(mapped, f"[BIOS] {msg}")
+
+        def uefi_cb(pct: int, msg: str) -> None:
+            mapped = 50 + int(pct * 0.48)
+            if progress_callback:
+                progress_callback(mapped, f"[UEFI] {msg}")
+
+        self._emit(progress_callback, 2, "Installing BIOS boot sector…")
         bios_ok = False
         try:
-            bios_ok = self._impl.write_bios_boot(device, options, sub_cb)
+            bios_ok = self._impl.write_bios_boot(device, options, bios_cb)
         except Exception as exc:
             logger.warning(f"Dual/BIOS failed: {exc}")
-            self._emit(progress_callback, 48,
+            self._emit(progress_callback, 46,
                        f"Warning: BIOS boot sector failed: {exc}")
 
         self._emit(progress_callback, 50, "Installing UEFI boot sector…")
         uefi_ok = False
         try:
-            uefi_ok = self._impl.write_uefi_boot(device, options, sub_cb)
+            uefi_ok = self._impl.write_uefi_boot(device, options, uefi_cb)
         except Exception as exc:
             logger.warning(f"Dual/UEFI failed: {exc}")
-            self._emit(progress_callback, 98,
+            self._emit(progress_callback, 97,
                        f"Warning: UEFI boot sector failed: {exc}")
 
         if bios_ok and uefi_ok:
@@ -152,19 +156,16 @@ class BootSectorManager:
                        "Dual boot sectors installed (BIOS + UEFI)")
         elif bios_ok:
             self._emit(progress_callback, 100,
-                       "Dual boot: BIOS OK, UEFI failed — BIOS-only boot")
+                       "Dual boot: BIOS OK — UEFI failed (BIOS-only boot)")
         elif uefi_ok:
             self._emit(progress_callback, 100,
-                       "Dual boot: UEFI OK, BIOS failed — UEFI-only boot")
+                       "Dual boot: UEFI OK — BIOS failed (UEFI-only boot)")
         else:
             self._emit(progress_callback, 0,
                        "Dual boot: both BIOS and UEFI installation failed")
 
         return bios_ok or uefi_ok
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
     def _emit(
         self,

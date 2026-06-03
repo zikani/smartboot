@@ -148,3 +148,4 @@ temp/
 output/
 remove_comments.py
 generate_icon.py
+generate_assets.py

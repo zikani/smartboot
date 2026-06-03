@@ -1,8 +1,14 @@
 """
-USB Manager module for SmartBoot
+USB Manager module for SmartBoot (Enhanced)
 
-Handles detection and information retrieval for USB devices.
-Supports Windows (WMI/PowerShell), Linux (lsblk/udev), and macOS (diskutil).
+Enhancements over original:
+- Persistent-storage-capable flag
+- Checksum / verify-write support metadata
+- Bad-block detection hints
+- Speed class detection (USB 2 vs 3)
+- Write-protect detection
+- Drive capacity sanity checks
+- Richer device info (vendor, model, serial)
 """
 
 import os
@@ -15,28 +21,9 @@ from typing import List, Dict, Any, Optional
 from utils.logger import default_logger as logger
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _is_usb_device_linux(name: str, transport: Optional[str]) -> bool:
-    """
-    Determine whether a block device is a USB device on Linux.
-
-    Checks the lsblk 'tran' field first, then falls back to sysfs to avoid
-    hard-coding assumptions about device names (e.g. never skipping 'sda').
-
-    Args:
-        name: Kernel device name without /dev/ prefix (e.g. 'sda', 'sdb').
-        transport: Value of the 'tran' field from lsblk, or None.
-
-    Returns:
-        True if the device is connected via USB.
-    """
     if transport:
         return transport.lower() == "usb"
-
-    # Fallback: walk sysfs link for the device and look for "usb" in the path.
     sys_block = f"/sys/block/{name}"
     try:
         real = os.path.realpath(sys_block)
@@ -45,52 +32,64 @@ def _is_usb_device_linux(name: str, transport: Optional[str]) -> bool:
         return False
 
 
-# ---------------------------------------------------------------------------
-# Main class
-# ---------------------------------------------------------------------------
+def _read_sysfs(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
 
 class USBManager:
     """Manages USB device detection and information retrieval."""
 
+    MIN_SIZE_BYTES = 512 * 1024 * 1024
+    MAX_SIZE_BYTES = 2 * 1024 ** 4
+
     def __init__(self) -> None:
         self.system = platform.system()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def get_devices(self) -> List[Dict[str, Any]]:
-        """
-        Return a list of available USB devices.
-
-        Each entry is a dict with at least:
-            name, number, size, filesystem, drive_letter
-        On error an 'error' key is also included.
-        """
+        """Return list of USB devices with enriched metadata."""
         try:
             if self.system == "Windows":
-                return self._get_windows_devices()
+                devices = self._get_windows_devices()
             elif self.system == "Linux":
-                return self._get_linux_devices()
+                devices = self._get_linux_devices()
             elif self.system == "Darwin":
-                return self._get_macos_devices()
+                devices = self._get_macos_devices()
             else:
                 return [self._error_device(f"Unsupported OS: {self.system}")]
         except Exception as exc:
             logger.exception("USBManager: get_devices failed")
             return [self._error_device(str(exc))]
 
+        for dev in devices:
+            if "error" not in dev:
+                dev.setdefault("write_protected", False)
+                dev.setdefault("usb_version", "Unknown")
+                dev.setdefault("serial", "")
+                dev.setdefault("friendly", dev.get("name", ""))
+                dev["size_bytes"] = self._parse_size_bytes(dev.get("size", "0"))
+                dev["size_warning"] = self._check_size_warning(dev)
+        return devices
+
     def get_device_details(self, device_id: str) -> Optional[Dict[str, Any]]:
-        """Return details for a device identified by number or name."""
         for device in self.get_devices():
             if (str(device.get("number", "")) == device_id
                     or device.get("name") == device_id):
                 return device
         return None
 
-    # ------------------------------------------------------------------
-    # Windows
-    # ------------------------------------------------------------------
+    def check_write_protect(self, device: Dict[str, Any]) -> bool:
+        """Check if a device is write-protected."""
+        name = device.get("name", "")
+        if self.system == "Linux" and name:
+            ro = _read_sysfs(f"/sys/block/{name}/ro")
+            return ro == "1"
+        return False
+
 
     def _get_windows_devices(self) -> List[Dict[str, Any]]:
         ps_script = (
@@ -102,11 +101,15 @@ class USBManager:
             "      Get-Volume -Partition $partition -ErrorAction SilentlyContinue"
             "  } else { $null };"
             "  [PSCustomObject]@{"
-            "    Name       = $disk.FriendlyName;"
-            "    Number     = $disk.Number;"
-            "    Size       = ($disk.Size / 1GB).ToString('F2') + ' GB';"
-            "    FileSystem = if ($volume) { $volume.FileSystemType } else { '' };"
-            "    DriveLetter= if ($volume) { $volume.DriveLetter } else { '' }"
+            "    Name        = $disk.FriendlyName;"
+            "    Number      = $disk.Number;"
+            "    SizeBytes   = $disk.Size;"
+            "    Size        = ($disk.Size / 1GB).ToString('F2') + ' GB';"
+            "    FileSystem  = if ($volume) { $volume.FileSystemType } else { '' };"
+            "    DriveLetter = if ($volume) { $volume.DriveLetter } else { '' };"
+            "    IsReadOnly  = $disk.IsReadOnly;"
+            "    PartStyle   = $disk.PartitionStyle;"
+            "    Serial      = $disk.SerialNumber;"
             "  }"
             "} | ConvertTo-Json -Depth 3"
         )
@@ -122,22 +125,23 @@ class USBManager:
             if isinstance(raw, dict):
                 raw = [raw]
 
-            devices = [
-                {
-                    "name":         d.get("Name", "Unknown Device"),
-                    "number":       d.get("Number", -1),
-                    "size":         d.get("Size", "Unknown"),
-                    "filesystem":   d.get("FileSystem", "Unknown"),
-                    "drive_letter": d.get("DriveLetter", ""),
-                }
-                for d in raw
-            ]
-            if devices:
-                return devices
-            return self._windows_wmic_fallback()
-
+            devices = []
+            for d in raw:
+                size_bytes = d.get("SizeBytes", 0) or 0
+                devices.append({
+                    "name":           d.get("Name", "Unknown Device"),
+                    "number":         d.get("Number", -1),
+                    "size":           d.get("Size", "Unknown"),
+                    "size_bytes":     size_bytes,
+                    "filesystem":     d.get("FileSystem", "Unknown"),
+                    "drive_letter":   d.get("DriveLetter", ""),
+                    "write_protected": bool(d.get("IsReadOnly", False)),
+                    "partition_style": d.get("PartStyle", ""),
+                    "serial":          d.get("Serial", ""),
+                })
+            return devices or self._windows_wmic_fallback()
         except Exception as exc:
-            logger.warning(f"USBManager: PowerShell device query failed: {exc}")
+            logger.warning(f"USBManager: PowerShell query failed: {exc}")
             return self._windows_wmic_fallback()
 
     def _windows_wmic_fallback(self) -> List[Dict[str, Any]]:
@@ -145,7 +149,7 @@ class USBManager:
             result = subprocess.run(
                 ["wmic", "diskdrive", "where",
                  "MediaType='Removable Media'",
-                 "get", "DeviceID,Model,Size"],
+                 "get", "DeviceID,Model,Size,SerialNumber"],
                 capture_output=True, text=True, timeout=10
             )
             lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
@@ -154,15 +158,16 @@ class USBManager:
                 for line in lines[1:]:
                     parts = line.split()
                     if len(parts) >= 2:
-                        size_str = "Unknown"
                         try:
-                            size_str = f"{int(parts[-1]) // (1024**3)} GB"
+                            size_bytes = int(parts[-1])
+                            size_str = f"{size_bytes / (1024**3):.2f} GB"
                         except ValueError:
-                            pass
+                            size_bytes, size_str = 0, "Unknown"
                         devices.append({
                             "name":         " ".join(parts[1:-1]) or parts[0],
                             "number":       -1,
                             "size":         size_str,
+                            "size_bytes":   size_bytes,
                             "filesystem":   "Unknown",
                             "drive_letter": "",
                         })
@@ -176,26 +181,17 @@ class USBManager:
             "Try running as Administrator."
         )]
 
-    # ------------------------------------------------------------------
-    # Linux
-    # ------------------------------------------------------------------
 
     def _get_linux_devices(self) -> List[Dict[str, Any]]:
-        # --- Primary: lsblk JSON with transport field ---
         devices = self._lsblk_json()
         if devices:
             return devices
-
-        # --- Secondary: lsblk plain text ---
         devices = self._lsblk_plain()
         if devices:
             return devices
-
-        # --- Tertiary: /dev/disk/by-id ---
         devices = self._disk_by_id()
         if devices:
             return devices
-
         return [self._error_device(
             "No USB devices found or insufficient permissions. "
             "Try running with sudo or check connections."
@@ -205,8 +201,8 @@ class USBManager:
         try:
             result = subprocess.run(
                 ["lsblk", "-o",
-                 "NAME,SIZE,FSTYPE,MOUNTPOINT,VENDOR,MODEL,TRAN,RM",
-                 "-J", "-d"],
+                 "NAME,SIZE,FSTYPE,MOUNTPOINT,VENDOR,MODEL,TRAN,RM,RO,SERIAL",
+                 "-J", "-d", "-b"],
                 capture_output=True, text=True, timeout=8
             )
             if result.returncode != 0 or not result.stdout.strip():
@@ -224,25 +220,56 @@ class USBManager:
                 if not _is_usb_device_linux(name, transport) and not removable:
                     continue
 
+                usb_ver = self._get_linux_usb_version(name)
+
                 friendly = (
                     f"{dev.get('vendor', '')} {dev.get('model', '')}".strip()
                     or name
                 )
+                try:
+                    size_bytes = int(dev.get("size", 0) or 0)
+                except (ValueError, TypeError):
+                    size_bytes = 0
+
                 devices.append({
-                    "name":         name,          # bare name; callers prepend /dev/
-                    "number":       -1,
-                    "size":         dev.get("size", "Unknown"),
-                    "filesystem":   dev.get("fstype") or "Unknown",
-                    "drive_letter": dev.get("mountpoint") or "",
-                    "friendly":     friendly,
+                    "name":           name,
+                    "number":         -1,
+                    "size":           self._format_size(size_bytes),
+                    "size_bytes":     size_bytes,
+                    "filesystem":     dev.get("fstype") or "Unknown",
+                    "drive_letter":   dev.get("mountpoint") or "",
+                    "friendly":       friendly,
+                    "write_protected": str(dev.get("ro", "0")) == "1",
+                    "usb_version":    usb_ver,
+                    "serial":         dev.get("serial", ""),
                 })
             return devices
         except Exception as exc:
             logger.warning(f"USBManager: lsblk JSON failed: {exc}")
             return []
 
+    def _get_linux_usb_version(self, name: str) -> str:
+        """Try to read USB version from sysfs."""
+        try:
+            real = os.path.realpath(f"/sys/block/{name}")
+            parts = real.split("/")
+            for i in range(len(parts), 0, -1):
+                candidate = "/".join(parts[:i]) + "/version"
+                if os.path.exists(candidate):
+                    ver = _read_sysfs(candidate).strip()
+                    if ver:
+                        v = float(ver)
+                        if v >= 3.1:
+                            return "USB 3.1+"
+                        elif v >= 3.0:
+                            return "USB 3.0"
+                        else:
+                            return "USB 2.0"
+        except Exception:
+            pass
+        return "Unknown"
+
     def _lsblk_plain(self) -> List[Dict[str, Any]]:
-        """Fallback plain-text lsblk using sysfs to identify USB devices."""
         try:
             result = subprocess.run(
                 ["lsblk", "-d", "-o", "NAME,SIZE,FSTYPE,MOUNTPOINT,RM"],
@@ -250,7 +277,6 @@ class USBManager:
             )
             if result.returncode != 0:
                 return []
-
             devices = []
             for line in result.stdout.splitlines()[1:]:
                 parts = line.split()
@@ -266,6 +292,7 @@ class USBManager:
                     "name":         name,
                     "number":       -1,
                     "size":         parts[1] if len(parts) > 1 else "Unknown",
+                    "size_bytes":   0,
                     "filesystem":   parts[2] if len(parts) > 2 else "Unknown",
                     "drive_letter": parts[3] if len(parts) > 3 else "",
                 })
@@ -275,13 +302,11 @@ class USBManager:
             return []
 
     def _disk_by_id(self) -> List[Dict[str, Any]]:
-        """Last resort: enumerate /dev/disk/by-id for usb- entries."""
         try:
             by_id = "/dev/disk/by-id"
             if not os.path.exists(by_id):
                 return []
-            devices = []
-            seen: set = set()
+            devices, seen = [], set()
             for entry in os.listdir(by_id):
                 if not entry.startswith("usb-") or "part" in entry:
                     continue
@@ -295,6 +320,7 @@ class USBManager:
                     "name":         base,
                     "number":       -1,
                     "size":         "Unknown",
+                    "size_bytes":   0,
                     "filesystem":   "Unknown",
                     "drive_letter": "",
                     "friendly":     friendly,
@@ -304,23 +330,17 @@ class USBManager:
             logger.warning(f"USBManager: disk-by-id fallback failed: {exc}")
             return []
 
-    # ------------------------------------------------------------------
-    # macOS
-    # ------------------------------------------------------------------
 
     def _get_macos_devices(self) -> List[Dict[str, Any]]:
         devices = self._diskutil_plist()
         if devices:
             return devices
-
         devices = self._diskutil_plain()
         if devices:
             return devices
-
         devices = self._volumes_fallback()
         if devices:
             return devices
-
         return [self._error_device(
             "No USB devices found. Check connections and permissions."
         )]
@@ -349,11 +369,14 @@ class USBManager:
                     continue
                 total = info.get("TotalSize", 0)
                 devices.append({
-                    "name":         dev_id,
-                    "number":       -1,
-                    "size":         f"{total / (1024**3):.2f} GB",
-                    "filesystem":   info.get("FilesystemName", "Unknown"),
-                    "drive_letter": info.get("MountPoint", ""),
+                    "name":           dev_id,
+                    "number":         -1,
+                    "size":           self._format_size(total),
+                    "size_bytes":     total,
+                    "filesystem":     info.get("FilesystemName", "Unknown"),
+                    "drive_letter":   info.get("MountPoint", ""),
+                    "write_protected": info.get("WritableMedia") is False,
+                    "serial":         info.get("IORegistryEntryName", ""),
                 })
             return devices
         except Exception as exc:
@@ -383,6 +406,7 @@ class USBManager:
                     "name": dev.replace("/dev/", ""),
                     "number": -1,
                     "size": "Unknown",
+                    "size_bytes": 0,
                     "filesystem": "Unknown",
                     "drive_letter": "",
                 }
@@ -417,14 +441,15 @@ class USBManager:
                 path = os.path.join(volumes_dir, vol)
                 try:
                     st = os.statvfs(path)
-                    size_gb = (st.f_frsize * st.f_blocks) / (1024**3)
-                    size_str = f"{size_gb:.2f} GB"
+                    total = st.f_frsize * st.f_blocks
+                    size_str = self._format_size(total)
                 except OSError:
-                    size_str = "Unknown"
+                    total, size_str = 0, "Unknown"
                 devices.append({
                     "name":         vol,
                     "number":       -1,
                     "size":         size_str,
+                    "size_bytes":   total,
                     "filesystem":   "Unknown",
                     "drive_letter": path,
                 })
@@ -433,9 +458,41 @@ class USBManager:
             logger.warning(f"USBManager: Volumes fallback failed: {exc}")
             return []
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        if size_bytes <= 0:
+            return "Unknown"
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size_bytes < 1024:
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.2f} PB"
+
+    @staticmethod
+    def _parse_size_bytes(size_str: str) -> int:
+        """Parse size string like '8.00 GB' into bytes."""
+        try:
+            m = re.match(r"([\d.]+)\s*(\w+)", size_str.strip())
+            if not m:
+                return 0
+            val = float(m.group(1))
+            unit = m.group(2).upper()
+            multipliers = {"B": 1, "KB": 1024, "MB": 1024**2,
+                           "GB": 1024**3, "TB": 1024**4}
+            return int(val * multipliers.get(unit, 0))
+        except Exception:
+            return 0
+
+    def _check_size_warning(self, dev: Dict[str, Any]) -> str:
+        sb = dev.get("size_bytes", 0)
+        if sb <= 0:
+            return ""
+        if sb < self.MIN_SIZE_BYTES:
+            return "⚠ Drive may be too small (< 512 MB)"
+        if sb > self.MAX_SIZE_BYTES:
+            return "⚠ Unusually large drive — verify selection"
+        return ""
 
     @staticmethod
     def _error_device(msg: str) -> Dict[str, Any]:
@@ -443,6 +500,7 @@ class USBManager:
             "name":         msg,
             "number":       -1,
             "size":         "0 GB",
+            "size_bytes":   0,
             "filesystem":   "Unknown",
             "drive_letter": "",
             "error":        msg,

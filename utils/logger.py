@@ -1,92 +1,42 @@
-"""
-Logger module for SmartBoot
-
-This module provides logging functionality for the application.
-"""
-
+"""Logger module for SmartBoot."""
 import os
 import logging
 from logging.handlers import RotatingFileHandler
 import platform
-import datetime
 
+def _get_log_directory() -> str:
+    system = platform.system()
+    if system == "Windows":
+        return os.path.join(os.environ.get("APPDATA", ""), "SmartBoot", "logs")
+    elif system == "Darwin":
+        return os.path.join(os.path.expanduser("~"), "Library", "Logs", "SmartBoot")
+    return os.path.join(os.path.expanduser("~"), ".smartboot", "logs")
 
-class Logger:
-    """
-    Class for handling application logging.
-    """
-    
-    def __init__(self, name="smartboot", log_level=logging.INFO):
-        """
-        Initialize the logger.
-        
-        Args:
-            name (str): Logger name
-            log_level (int): Logging level
-        """
-        self.logger = logging.getLogger(name)
-        self.logger.setLevel(log_level)
-        
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(log_level)
-        console_handler.setFormatter(formatter)
-        
-        log_dir = self._get_log_directory()
+def _build_logger() -> logging.Logger:
+    logger = logging.getLogger("smartboot")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+    try:
+        log_dir = _get_log_directory()
         os.makedirs(log_dir, exist_ok=True)
-        
-        log_file = os.path.join(log_dir, "smartboot.log")
-        file_handler = RotatingFileHandler(
-            log_file, maxBytes=5*1024*1024, backupCount=5
+        fh = RotatingFileHandler(
+            os.path.join(log_dir, "smartboot.log"),
+            maxBytes=5 * 1024 * 1024, backupCount=5
         )
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(formatter)
-        
-        self.logger.addHandler(console_handler)
-        self.logger.addHandler(file_handler)
-        
-        self.logger.info(f"Logger initialized at {datetime.datetime.now()}")
-        self.logger.info(f"System: {platform.system()} {platform.release()}")
-    
-    def _get_log_directory(self):
-        """
-        Get the directory for log files based on the operating system.
-        
-        Returns:
-            str: Path to log directory
-        """
-        system = platform.system()
-        
-        if system == "Windows":
-            return os.path.join(os.environ.get("APPDATA", ""), "SmartBoot", "logs")
-        elif system == "Linux":
-            return os.path.join(os.path.expanduser("~"), ".smartboot", "logs")
-        elif system == "Darwin":
-            return os.path.join(os.path.expanduser("~"), "Library", "Logs", "SmartBoot")
-        else:
-            return os.path.join(os.path.expanduser("~"), "smartboot_logs")
-    
-    def get_logger(self):
-        """
-        Get the logger instance.
-        
-        Returns:
-            logging.Logger: Logger instance
-        """
-        return self.logger
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    except Exception:
+        pass
+    return logger
 
+default_logger = _build_logger()
 
-default_logger = Logger().get_logger()
-
-
-def get_logger():
-    """
-    Get the default logger instance.
-    
-    Returns:
-        logging.Logger: Logger instance
-    """
+def get_logger() -> logging.Logger:
     return default_logger
