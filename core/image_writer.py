@@ -172,7 +172,7 @@ class ImageWriter:
                                         "rhel", "arch", "manjaro", "linux",
                                         "mint", "kali")):
             return "linux"
-        if any(t in filename for t in ("freedos", "msdos", "dos")):
+        if any(t in filename for t in ("freedos", "fd", "msdos", "dos")):
             return "freedos"
 
         if self.system == "Windows":
@@ -659,6 +659,8 @@ Write-Host 'DONE'
         hi: int = 100,
     ) -> bool:
         """Cross-platform recursive copy with progress."""
+        if self._cancel_event.is_set():
+            return False
         if self.system == "Windows" and shutil.which("robocopy"):
             return self._robocopy(src, dst, cb, lo, hi)
         try:
@@ -671,6 +673,8 @@ Write-Host 'DONE'
             span = hi - lo
 
             for root, dirs, files in os.walk(src):
+                if self._cancel_event.is_set():
+                    return False
                 dirs[:] = [d for d in dirs if d != "_iso_mount"]
                 rel = os.path.relpath(root, src)
                 dest_root = os.path.join(dst, rel) if rel != "." else dst

@@ -247,6 +247,41 @@ class CreationWorker(QThread):
     def _emit(self, pct: int, msg: str) -> None:
         self.progress.emit(pct, msg)
 
+
+class DeviceRefreshWorker(QThread):
+    """Worker thread for refreshing USB device list."""
+    devices_loaded = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, usb_manager, parent=None):
+        super().__init__(parent)
+        self._usb_manager = usb_manager
+
+    def run(self):
+        try:
+            devices = self._usb_manager.get_devices()
+            self.devices_loaded.emit(devices)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class IsoLoadWorker(QThread):
+    """Worker thread for loading ISO information."""
+    iso_loaded = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, iso_manager, iso_path, parent=None):
+        super().__init__(parent)
+        self._iso_manager = iso_manager
+        self._iso_path = iso_path
+
+    def run(self):
+        try:
+            iso_info = self._iso_manager.get_iso_info(self._iso_path)
+            self.iso_loaded.emit(iso_info)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
     def _scale_cb(self, lo: int, hi: int):
         span = hi - lo
 

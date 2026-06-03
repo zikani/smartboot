@@ -41,7 +41,7 @@ from core.iso_manager          import ISOManager
 from core.image_writer         import ImageWriter
 from core.disk_formatter       import DiskFormatter
 from core.boot_sector.manager  import BootSectorManager
-from gui.worker                import CreationWorker
+from gui.worker                import CreationWorker, DeviceRefreshWorker, IsoLoadWorker
 
 
 # ---------------------------------------------------------------------------
@@ -247,8 +247,9 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         self.setWindowTitle("SmartBoot — USB Boot Media Creator")
-        self.setMinimumSize(700, 700)
-        self.resize(760, 800)
+        self.setWindowIcon(get_icon("app_logo", 32))
+        self.setMinimumSize(750, 700)
+        self.resize(800, 780)
 
         # Status bar
         self._status_bar = QStatusBar()
@@ -876,31 +877,50 @@ class MainWindow(QMainWindow):
         prev_name = self.selected_device.get("name", "")
         self.device_combo.blockSignals(True)
         self.device_combo.clear()
-        try:
-            self.devices = self.usb_manager.get_devices()
-            if not self.devices:
-                self.device_combo.addItem("No USB devices found")
-                self.selected_device = {}
-            else:
-                for dev in self.devices:
-                    name = dev.get("friendly") or dev.get("name", "Unknown")
-                    size = dev.get("size", "")
-                    label = f"{name}  ({size})"
-                    self.device_combo.addItem(label)
-                # Try to reselect previous device
-                self.selected_device = self.devices[0]
-                for i, dev in enumerate(self.devices):
-                    if dev.get("name") == prev_name:
-                        self.device_combo.setCurrentIndex(i)
-                        self.selected_device = dev
-                        break
-        except Exception as exc:
-            QMessageBox.critical(self, "Error",
-                                 f"Failed to enumerate devices:\n{exc}")
+        self.device_combo.addItem("Refreshing...")
+        self.device_combo.blockSignals(False)
+
+        self._device_refresh_worker = DeviceRefreshWorker(self.usb_manager)
+        self._device_refresh_worker.devices_loaded.connect(
+            lambda devices: self._on_devices_loaded(devices, prev_name)
+        )
+        self._device_refresh_worker.error.connect(
+            lambda error: self._on_device_refresh_error(error)
+        )
+        self._device_refresh_worker.start()
+
+    def _on_devices_loaded(self, devices: list, prev_name: str) -> None:
+        self.device_combo.blockSignals(True)
+        self.device_combo.clear()
+        self.devices = devices
+        if not self.devices:
+            self.device_combo.addItem("No USB devices found")
             self.selected_device = {}
-        finally:
-            self.device_combo.blockSignals(False)
-            self._update_device_info()
+        else:
+            for dev in self.devices:
+                name = dev.get("friendly") or dev.get("name", "Unknown")
+                size = dev.get("size", "")
+                label = f"{name}  ({size})"
+                self.device_combo.addItem(label)
+            # Try to reselect previous device
+            self.selected_device = self.devices[0]
+            for i, dev in enumerate(self.devices):
+                if dev.get("name") == prev_name:
+                    self.device_combo.setCurrentIndex(i)
+                    self.selected_device = dev
+                    break
+        self.device_combo.blockSignals(False)
+        self._update_device_info()
+
+    def _on_device_refresh_error(self, error: str) -> None:
+        self.device_combo.blockSignals(True)
+        self.device_combo.clear()
+        self.device_combo.addItem("Error loading devices")
+        self.device_combo.blockSignals(False)
+        QMessageBox.critical(self, "Error",
+                             f"Failed to enumerate devices:\n{error}")
+        self.selected_device = {}
+        self._update_device_info()
 
     def _auto_refresh_devices(self) -> None:
         """Silent refresh — only update if device count changes."""
@@ -968,46 +988,61 @@ class MainWindow(QMainWindow):
         self.iso_path_lbl.setText(os.path.basename(path))
         self.iso_path_lbl.setToolTip(path)
         self._status_bar.showMessage(f"Loading ISO info: {os.path.basename(path)}…")
-        try:
-            self.iso_info = self.iso_manager.get_iso_info(path)
-            info = self.iso_info
-            parts = [
-                f"Size: {info['size']}",
-                f"Type: {info.get('type','Unknown')}",
-            ]
-            if info.get("label"):
-                parts.append(f"Label: {info['label']}")
-            if info.get("is_hybrid"):
-                parts.append("Hybrid ISO")
-            if info.get("has_efi"):
-                parts.append("EFI")
-            self.iso_info_lbl.setText("  •  ".join(parts))
+        self.iso_info_lbl.setText("Loading...")
+        self.iso_rec_lbl.setVisible(False)
 
-            # Recommendations
-            recs = []
-            if info.get("recommended_scheme"):
-                recs.append(f"Scheme: {info['recommended_scheme']}")
-            if info.get("recommended_boot"):
-                recs.append(f"Boot: {info['recommended_boot'].upper()}")
-            if info.get("recommended_fs"):
-                recs.append(f"FS: {info['recommended_fs']}")
-            if info.get("persistence_capable"):
-                recs.append("Persistence supported")
-            if recs:
-                self.iso_rec_lbl.setText("Recommended: " + "  •  ".join(recs))
-                self.iso_rec_lbl.setVisible(True)
-                self._apply_recommendations(info)
-            else:
-                self.iso_rec_lbl.setVisible(False)
+        self._iso_load_worker = IsoLoadWorker(self.iso_manager, path)
+        self._iso_load_worker.iso_loaded.connect(
+            lambda info: self._on_iso_loaded(info, path)
+        )
+        self._iso_load_worker.error.connect(
+            lambda error: self._on_iso_load_error(error)
+        )
+        self._iso_load_worker.start()
 
-            # Enable checksum buttons
-            self.compute_hash_btn.setEnabled(True)
-            self.verify_hash_btn.setEnabled(True)
-            self._populate_recent_menu()
-            self._log(f"ISO loaded: {os.path.basename(path)} ({info['size']}, {info.get('type','?')})")
-        except Exception as exc:
-            self.iso_info_lbl.setText(f"Could not read ISO info: {exc}")
+    def _on_iso_loaded(self, info: dict, path: str) -> None:
+        self.iso_info = info
+        parts = [
+            f"Size: {info['size']}",
+            f"Type: {info.get('type','Unknown')}",
+        ]
+        if info.get("label"):
+            parts.append(f"Label: {info['label']}")
+        if info.get("is_hybrid"):
+            parts.append("Hybrid ISO")
+        if info.get("has_efi"):
+            parts.append("EFI")
+        self.iso_info_lbl.setText("  •  ".join(parts))
+
+        # Recommendations
+        recs = []
+        if info.get("recommended_scheme"):
+            recs.append(f"Scheme: {info['recommended_scheme']}")
+        if info.get("recommended_boot"):
+            recs.append(f"Boot: {info['recommended_boot'].upper()}")
+        if info.get("recommended_fs"):
+            recs.append(f"FS: {info['recommended_fs']}")
+        if info.get("persistence_capable"):
+            recs.append("Persistence supported")
+        if recs:
+            self.iso_rec_lbl.setText("Recommended: " + "  •  ".join(recs))
+            self.iso_rec_lbl.setVisible(True)
+            self._apply_recommendations(info)
+        else:
             self.iso_rec_lbl.setVisible(False)
+
+        # Enable checksum buttons
+        self.compute_hash_btn.setEnabled(True)
+        self.verify_hash_btn.setEnabled(True)
+        self._populate_recent_menu()
+        self._log(f"ISO loaded: {os.path.basename(path)} ({info['size']}, {info.get('type','?')})")
+        self.iso_manager.add_to_history(path)
+        self._status_bar.showMessage("Ready")
+        self._update_start_btn()
+
+    def _on_iso_load_error(self, error: str) -> None:
+        self.iso_info_lbl.setText(f"Could not read ISO info: {error}")
+        self.iso_rec_lbl.setVisible(False)
         self._status_bar.showMessage("Ready")
         self._update_start_btn()
 

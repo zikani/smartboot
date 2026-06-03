@@ -17,6 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Boot type options (BIOS, UEFI, Dual, FreeDOS)
 - Boot sector writing for all platforms
 - Direct write mode (dd-like)
+- SVG icon system with `get_icon()` function for consistent icon rendering
+- Background threading for USB device refresh to prevent UI freezing
+- Background threading for ISO info loading to prevent UI freezing
+- ISOManager methods: `compute_checksum()`, `verify_checksum()`, `_format_size()`, `_is_hybrid_iso()`, `_read_volume_label()`, `_recommend_fs()`
+- EFI boot detection for ISO files
+- Automatic ISO history tracking in `get_iso_info()`
+
+### Changed
+- Improved ISO type detection with better FreeDOS recognition (supports "fd" abbreviations)
+- Changed "Unknown (small ISO)" to "Generic" for clearer type naming
+- Enhanced `get_iso_info()` to include: `is_hybrid`, `has_efi`, `persistence_capable`, `recommended_fs`, `recommended_scheme`, `min_usb_bytes`, `label`
+- Improved copy tree cancellation handling with additional cancel checks
+- Adjusted default window size to 800x780 (from 800x850) for better fit
+- Adjusted minimum window size to 750x700 (from 750x750)
+
+### Fixed
+- Icon visibility issues - icons now properly display using SVG rendering
+- UI freezing during device refresh and ISO loading operations
+- Test suite failures - all 122 tests now passing
+- Window title icon not displaying
+- Copy tree cancellation not working correctly
 - Progress tracking and logging
 - PyQt5-based GUI
 
