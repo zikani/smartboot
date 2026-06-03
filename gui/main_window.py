@@ -44,10 +44,13 @@ from core.boot_sector.manager  import BootSectorManager
 from gui.worker                import CreationWorker
 
 
+# ---------------------------------------------------------------------------
+# Checksum worker
+# ---------------------------------------------------------------------------
 
 class ChecksumWorker(QThread):
     progress = pyqtSignal(int, str)
-    result   = pyqtSignal(str, str)
+    result   = pyqtSignal(str, str)   # (algorithm, digest)
 
     def __init__(self, iso_manager, iso_path: str, algorithm: str, parent=None):
         super().__init__(parent)
@@ -62,6 +65,9 @@ class ChecksumWorker(QThread):
         self.result.emit(self._algo, digest)
 
 
+# ---------------------------------------------------------------------------
+# About dialog
+# ---------------------------------------------------------------------------
 
 class AboutDialog(QDialog):
     def __init__(self, parent=None):
@@ -98,6 +104,9 @@ class AboutDialog(QDialog):
         layout.addWidget(btns)
 
 
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
 
@@ -113,12 +122,14 @@ class MainWindow(QMainWindow):
         self.resource_dir = os.path.join(tempfile.gettempdir(), "smartboot_resources")
         os.makedirs(self.resource_dir, exist_ok=True)
 
+        # Core objects
         self.usb_manager  = USBManager()
         self.iso_manager  = ISOManager()
         self.writer       = ImageWriter()
         self.formatter    = DiskFormatter()
         self.boot_manager = BootSectorManager()
 
+        # State
         self.devices: list         = []
         self.selected_device: dict = {}
         self.selected_iso: str     = ""
@@ -132,10 +143,14 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self.refresh_devices()
 
+        # Auto-refresh device list every 3 seconds
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._auto_refresh_devices)
         self._refresh_timer.start(3000)
 
+    # ------------------------------------------------------------------
+    # Drag-and-drop
+    # ------------------------------------------------------------------
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
@@ -150,10 +165,14 @@ class MainWindow(QMainWindow):
             if path.lower().endswith(".iso"):
                 self._load_iso(path)
 
+    # ------------------------------------------------------------------
+    # Menu
+    # ------------------------------------------------------------------
 
     def _build_menu(self) -> None:
         mb = self.menuBar()
 
+        # File
         file_menu = mb.addMenu("&File")
         open_iso = QAction("&Open ISO…", self)
         open_iso.setShortcut("Ctrl+O")
@@ -170,6 +189,7 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        # View
         view_menu = mb.addMenu("&View")
         self._theme_action = QAction("Switch to Dark Theme", self)
         self._theme_action.triggered.connect(self._toggle_theme)
@@ -182,6 +202,7 @@ class MainWindow(QMainWindow):
         self._log_action = log_action
         view_menu.addAction(log_action)
 
+        # Tools
         tools_menu = mb.addMenu("&Tools")
         refresh_action = QAction("&Refresh Devices", self)
         refresh_action.setShortcut("F5")
@@ -192,6 +213,7 @@ class MainWindow(QMainWindow):
         checksum_action.triggered.connect(self._open_checksum_tab)
         tools_menu.addAction(checksum_action)
 
+        # Help
         help_menu = mb.addMenu("&Help")
         about_action = QAction("&About SmartBoot", self)
         about_action.triggered.connect(lambda: AboutDialog(self).exec_())
@@ -219,18 +241,24 @@ class MainWindow(QMainWindow):
         self.iso_manager.clear_history()
         self._populate_recent_menu()
 
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
         self.setWindowTitle("SmartBoot — USB Boot Media Creator")
         self.setMinimumSize(700, 700)
         self.resize(760, 800)
 
+        # Status bar
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("Ready")
 
+        # Central widget with splitter (main + log)
         self._splitter = QSplitter(Qt.Vertical)
 
+        # Main panel
         main_widget = QWidget()
         main_layout = QVBoxLayout(main_widget)
         main_layout.setSpacing(8)
@@ -240,6 +268,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self._make_device_group())
         main_layout.addWidget(self._make_iso_group())
 
+        # Tab widget for Options / Checksum
         self._tabs = QTabWidget()
         self._tabs.addTab(self._make_options_widget(), "Options")
         self._tabs.addTab(self._make_checksum_widget(), "Checksum")
@@ -251,6 +280,7 @@ class MainWindow(QMainWindow):
 
         self._splitter.addWidget(main_widget)
 
+        # Log panel (hidden by default)
         self._log_panel = self._make_log_panel()
         self._log_panel.setVisible(False)
         self._splitter.addWidget(self._log_panel)
@@ -264,7 +294,7 @@ class MainWindow(QMainWindow):
         h.setContentsMargins(0, 0, 0, 0)
 
         icon_lbl = QLabel()
-        icon_lbl.setPixmap(QIcon(get_icon("app_logo")).pixmap(32, 32))
+        icon_lbl.setPixmap(get_icon("app_logo", 32).pixmap(32, 32))
 
         title_lbl = QLabel("SmartBoot")
         title_lbl.setFont(QFont("Georgia", 18, QFont.Bold))
@@ -285,7 +315,7 @@ class MainWindow(QMainWindow):
         h.addStretch()
 
         self._theme_btn = QToolButton()
-        self._theme_btn.setIcon(QIcon(get_icon("dark_mode")))
+        self._theme_btn.setIcon(get_icon("dark_mode", 24))
         self._theme_btn.setIconSize(QSize(24, 24))
         self._theme_btn.setToolTip("Toggle dark/light theme")
         self._theme_btn.clicked.connect(self._toggle_theme)
@@ -293,6 +323,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self._theme_btn)
         return w
 
+    # ── Device group ────────────────────────────────────────────────────
 
     def _make_device_group(self) -> QGroupBox:
         grp = QGroupBox("① Device")
@@ -306,7 +337,7 @@ class MainWindow(QMainWindow):
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
 
         self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.setIcon(QIcon(get_icon("refresh")))
+        self.refresh_btn.setIcon(get_icon("refresh", 16))
         self.refresh_btn.setFixedWidth(90)
         self.refresh_btn.clicked.connect(self.refresh_devices)
 
@@ -326,6 +357,7 @@ class MainWindow(QMainWindow):
         vbox.addWidget(self.device_warn_lbl)
         return grp
 
+    # ── ISO group ────────────────────────────────────────────────────────
 
     def _make_iso_group(self) -> QGroupBox:
         grp = QGroupBox("② ISO Image  (drag & drop supported)")
@@ -339,7 +371,7 @@ class MainWindow(QMainWindow):
         self.iso_path_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         self.browse_btn = QPushButton("Browse…")
-        self.browse_btn.setIcon(QIcon(get_icon("browse_folder")))
+        self.browse_btn.setIcon(get_icon("browse_folder", 16))
         self.browse_btn.setFixedWidth(100)
         self.browse_btn.clicked.connect(self._browse_iso)
 
@@ -359,12 +391,14 @@ class MainWindow(QMainWindow):
         vbox.addWidget(self.iso_rec_lbl)
         return grp
 
+    # ── Options tab ──────────────────────────────────────────────────────
 
     def _make_options_widget(self) -> QWidget:
         w = QWidget()
         form = QFormLayout(w)
         form.setSpacing(8)
 
+        # -- Partition scheme
         self.scheme_group = QButtonGroup(self)
         mbr_rb = QRadioButton("MBR  (Legacy BIOS)")
         gpt_rb = QRadioButton("GPT  (UEFI / Modern)")
@@ -376,6 +410,7 @@ class MainWindow(QMainWindow):
         scheme_row.addWidget(gpt_rb)
         form.addRow("Partition Scheme:", scheme_row)
 
+        # -- Boot type
         self.boot_group = QButtonGroup(self)
         bios_rb = QRadioButton("BIOS")
         uefi_rb = QRadioButton("UEFI")
@@ -392,28 +427,34 @@ class MainWindow(QMainWindow):
         boot_grid.addWidget(fdos_rb, 1, 1)
         form.addRow("Boot Type:", boot_grid)
 
+        # Wire interdependency
         for btn in self.scheme_group.buttons() + self.boot_group.buttons():
             btn.toggled.connect(self._sync_boot_options)
 
+        # -- Filesystem
         self.fs_combo = QComboBox()
         self._update_fs_options()
         form.addRow("Filesystem:", self.fs_combo)
 
+        # -- Volume label
         self.label_edit = QLineEdit("SMARTBOOT")
         self.label_edit.setMaxLength(32)
         self.label_edit.setPlaceholderText("Volume label (max 11 chars for FAT32)")
         form.addRow("Volume Label:", self.label_edit)
 
+        # -- Cluster size
         self.cluster_combo = QComboBox()
         self.cluster_combo.addItems(self._CLUSTER_SIZES)
         form.addRow("Cluster Size:", self.cluster_combo)
 
+        # -- Quick format
         self.quick_fmt_chk = QCheckBox("Quick Format  (skip zero-fill)")
         self.quick_fmt_chk.setChecked(True)
         form.addRow("", self.quick_fmt_chk)
 
         return w
 
+    # ── Checksum tab ─────────────────────────────────────────────────────
 
     def _make_checksum_widget(self) -> QWidget:
         w = QWidget()
@@ -464,31 +505,37 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return w
 
+    # ── Advanced tab ─────────────────────────────────────────────────────
 
     def _make_advanced_widget(self) -> QWidget:
         w = QWidget()
         form = QFormLayout(w)
         form.setSpacing(8)
 
+        # Direct write
         self.direct_write_chk = QCheckBox(
             "Direct Write  (write ISO bytes directly — skips file extraction)"
         )
         form.addRow("", self.direct_write_chk)
 
+        # Verify after write
         self.verify_chk = QCheckBox("Verify written files after creation")
         form.addRow("", self.verify_chk)
 
+        # Bad block check
         self.bad_block_chk = QCheckBox(
             "Bad Block Check  (read-only scan before format — slow)"
         )
         form.addRow("", self.bad_block_chk)
 
+        # ISO type override
         self.iso_type_combo = QComboBox()
         self.iso_type_combo.addItems(
             ["Auto-detect", "Windows", "Linux", "FreeDOS", "Generic"]
         )
         form.addRow("ISO Type Override:", self.iso_type_combo)
 
+        # Persistence (Linux live)
         persist_row = QHBoxLayout()
         self.persist_spin = QSpinBox()
         self.persist_spin.setRange(0, 32768)
@@ -506,12 +553,14 @@ class MainWindow(QMainWindow):
 
         return w
 
+    # ── Progress group ───────────────────────────────────────────────────
 
     def _make_progress_group(self) -> QGroupBox:
         grp = QGroupBox("Progress")
         grp.setObjectName("sectionGroup")
         vbox = QVBoxLayout(grp)
 
+        # Stage indicators
         stage_row = QHBoxLayout()
         self._stage_labels = []
         stages = ["Pre-flight", "Format", "Write ISO", "Boot Sector", "Verify", "Done"]
@@ -541,12 +590,13 @@ class MainWindow(QMainWindow):
         vbox.addWidget(self.status_lbl)
         return grp
 
+    # ── Button row ───────────────────────────────────────────────────────
 
     def _make_button_row(self) -> QHBoxLayout:
         hbox = QHBoxLayout()
 
         self.log_toggle_btn = QPushButton("Log")
-        self.log_toggle_btn.setIcon(QIcon(get_icon("log_panel")))
+        self.log_toggle_btn.setIcon(get_icon("log_panel", 16))
         self.log_toggle_btn.setCheckable(True)
         self.log_toggle_btn.setFixedWidth(70)
         self.log_toggle_btn.toggled.connect(self._toggle_log)
@@ -555,7 +605,7 @@ class MainWindow(QMainWindow):
         hbox.addStretch()
 
         self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setIcon(QIcon(get_icon("cancel")))
+        self.cancel_btn.setIcon(get_icon("cancel", 16))
         self.cancel_btn.setMinimumSize(110, 38)
         self.cancel_btn.setVisible(False)
         self.cancel_btn.clicked.connect(self._on_cancel)
@@ -563,7 +613,7 @@ class MainWindow(QMainWindow):
         hbox.addWidget(self.cancel_btn)
 
         self.start_btn = QPushButton("START")
-        self.start_btn.setIcon(QIcon(get_icon("start")))
+        self.start_btn.setIcon(get_icon("start", 16))
         self.start_btn.setMinimumSize(130, 38)
         self.start_btn.setEnabled(False)
         self.start_btn.clicked.connect(self._on_start)
@@ -571,6 +621,7 @@ class MainWindow(QMainWindow):
         hbox.addWidget(self.start_btn)
         return hbox
 
+    # ── Log panel ────────────────────────────────────────────────────────
 
     def _make_log_panel(self) -> QWidget:
         w = QWidget()
@@ -578,7 +629,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 4, 10, 4)
         hdr = QHBoxLayout()
         log_title = QLabel("Operation Log")
-        log_title.setPixmap(QIcon(get_icon("log_panel")).pixmap(16, 16))
+        log_title.setPixmap(get_icon("log_panel", 16).pixmap(16, 16))
         hdr.addWidget(log_title)
         hdr.addStretch()
         clear_btn = QPushButton("Clear")
@@ -593,6 +644,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._log_edit)
         return w
 
+    # ------------------------------------------------------------------
+    # Theme
+    # ------------------------------------------------------------------
 
     def _apply_theme(self) -> None:
         if self._dark_mode:
@@ -623,70 +677,70 @@ class MainWindow(QMainWindow):
                 font-family: "Segoe UI", "SF Pro Display", Ubuntu, sans-serif;
                 font-size: 10pt;
             }}
-            QGroupBox
+            QGroupBox#sectionGroup {{
                 border: 1px solid {border};
                 border-radius: 6px;
                 margin-top: 10px;
                 padding: 8px 6px 6px 6px;
                 background-color: {surface};
             }}
-            QGroupBox
+            QGroupBox#sectionGroup::title {{
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 4px;
                 color: {accent};
                 font-weight: bold;
             }}
-            QLabel
+            QLabel#headerTitle {{
                 color: {accent};
                 font-size: 18pt;
                 font-weight: bold;
             }}
-            QLabel
+            QLabel#tagline {{
                 color: {text};
                 font-size: 9pt;
                 opacity: 0.7;
             }}
-            QLabel
+            QLabel#infoLabel {{
                 color: {text};
                 font-size: 9pt;
             }}
-            QLabel
+            QLabel#warnLabel {{
                 color: {warn};
                 font-weight: bold;
             }}
-            QLabel
+            QLabel#recLabel {{
                 color: {ok};
             }}
-            QLabel
+            QLabel#statusLabel {{
                 font-size: 9pt;
                 color: {text};
             }}
-            QLabel
+            QLabel#stageLabel {{
                 background: {stage_inactive};
                 border-radius: 4px;
                 padding: 2px 6px;
                 font-size: 8pt;
                 color: {text};
             }}
-            QLabel
+            QLabel#stageLabel[active="true"] {{
                 background: {accent};
                 color: white;
                 font-weight: bold;
             }}
-            QLabel
+            QLabel#stageLabel[done="true"] {{
                 background: {ok};
                 color: white;
             }}
-            QLabel
+            QLabel#stageArrow {{
                 color: {border};
                 font-size: 14pt;
             }}
-            QLabel
+            QLabel#checksumMatch[ok="true"] {{
                 color: {ok};
                 font-weight: bold;
             }}
-            QLabel
+            QLabel#checksumMatch[ok="false"] {{
                 color: {warn};
                 font-weight: bold;
             }}
@@ -713,7 +767,7 @@ class MainWindow(QMainWindow):
                 color: white;
                 border-color: {accent};
             }}
-            QPushButton
+            QPushButton#startBtn {{
                 background: {accent};
                 color: white;
                 font-weight: bold;
@@ -721,18 +775,18 @@ class MainWindow(QMainWindow):
                 border-radius: 5px;
                 font-size: 11pt;
             }}
-            QPushButton
+            QPushButton#startBtn:disabled {{
                 background: {border};
                 color: {text};
             }}
-            QPushButton
+            QPushButton#startBtn:hover:!disabled {{
                 background: {'#1976D2' if not self._dark_mode else '#74c7ec'};
             }}
-            QPushButton
+            QPushButton#cancelBtn {{
                 border-color: {warn};
                 color: {warn};
             }}
-            QPushButton
+            QPushButton#cancelBtn:hover {{
                 background: {warn};
                 color: white;
             }}
@@ -807,13 +861,16 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self) -> None:
         self._dark_mode = not self._dark_mode
         self._apply_theme()
-        self._theme_btn.setIcon(QIcon(get_icon("light_mode" if self._dark_mode else "dark_mode")))
+        self._theme_btn.setIcon(get_icon("light_mode" if self._dark_mode else "dark_mode", 24))
         if hasattr(self, "_theme_action"):
             self._theme_action.setText(
                 "Switch to Light Theme" if self._dark_mode
                 else "Switch to Dark Theme"
             )
 
+    # ------------------------------------------------------------------
+    # Device management
+    # ------------------------------------------------------------------
 
     def refresh_devices(self) -> None:
         prev_name = self.selected_device.get("name", "")
@@ -830,6 +887,7 @@ class MainWindow(QMainWindow):
                     size = dev.get("size", "")
                     label = f"{name}  ({size})"
                     self.device_combo.addItem(label)
+                # Try to reselect previous device
                 self.selected_device = self.devices[0]
                 for i, dev in enumerate(self.devices):
                     if dev.get("name") == prev_name:
@@ -889,6 +947,9 @@ class MainWindow(QMainWindow):
             self.device_warn_lbl.setVisible(False)
         self._update_start_btn()
 
+    # ------------------------------------------------------------------
+    # ISO selection
+    # ------------------------------------------------------------------
 
     def _browse_iso(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -922,6 +983,7 @@ class MainWindow(QMainWindow):
                 parts.append("EFI")
             self.iso_info_lbl.setText("  •  ".join(parts))
 
+            # Recommendations
             recs = []
             if info.get("recommended_scheme"):
                 recs.append(f"Scheme: {info['recommended_scheme']}")
@@ -938,10 +1000,10 @@ class MainWindow(QMainWindow):
             else:
                 self.iso_rec_lbl.setVisible(False)
 
+            # Enable checksum buttons
             self.compute_hash_btn.setEnabled(True)
             self.verify_hash_btn.setEnabled(True)
             self._populate_recent_menu()
-            self.iso_manager.add_to_history(path)
             self._log(f"ISO loaded: {os.path.basename(path)} ({info['size']}, {info.get('type','?')})")
         except Exception as exc:
             self.iso_info_lbl.setText(f"Could not read ISO info: {exc}")
@@ -968,10 +1030,14 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.fs_combo.setCurrentIndex(idx)
 
+        # Set label from ISO
         label = info.get("label", "")
         if label:
             self.label_edit.setText(label[:32])
 
+    # ------------------------------------------------------------------
+    # Options sync
+    # ------------------------------------------------------------------
 
     def _sync_boot_options(self) -> None:
         boot_id   = self.boot_group.checkedId()
@@ -1015,6 +1081,9 @@ class MainWindow(QMainWindow):
         )
         self.start_btn.setEnabled(can_start)
 
+    # ------------------------------------------------------------------
+    # Checksum
+    # ------------------------------------------------------------------
 
     def _open_checksum_tab(self) -> None:
         self._tabs.setCurrentIndex(1)
@@ -1043,6 +1112,7 @@ class MainWindow(QMainWindow):
         self.compute_hash_btn.setEnabled(True)
         self.verify_hash_btn.setEnabled(True)
         self._log(f"{algo.upper()} checksum: {digest}")
+        # Auto-verify if expected was pre-filled
         if self.checksum_expected.text().strip():
             self._verify_checksum()
 
@@ -1063,12 +1133,16 @@ class MainWindow(QMainWindow):
         self.checksum_match_lbl.style().unpolish(self.checksum_match_lbl)
         self.checksum_match_lbl.style().polish(self.checksum_match_lbl)
 
+    # ------------------------------------------------------------------
+    # Start / Cancel
+    # ------------------------------------------------------------------
 
     def _on_start(self) -> None:
         d = self.selected_device
         name = d.get("friendly") or d.get("name", "the selected device")
         size = d.get("size", "")
 
+        # Extra confirmation: write-protect
         if d.get("write_protected"):
             QMessageBox.warning(
                 self, "Write Protected",
@@ -1077,6 +1151,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # ISO size vs device size
         try:
             iso_size = os.path.getsize(self.selected_iso)
             dev_size = d.get("size_bytes", 0)
@@ -1174,6 +1249,7 @@ class MainWindow(QMainWindow):
         self._log(f"FINISHED (success={success}): {msg}")
 
         if success:
+            # Mark all stages done
             for lbl in self._stage_labels:
                 lbl.setProperty("done", "true")
                 lbl.setProperty("active", "false")
@@ -1183,6 +1259,9 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Completed with Issues", msg)
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _collect_options(self) -> dict:
         scheme  = self._SCHEME_MAP.get(self.scheme_group.checkedId(), "MBR")
@@ -1254,6 +1333,7 @@ class MainWindow(QMainWindow):
             import time
             ts = time.strftime("%H:%M:%S")
             self._log_edit.append(f"[{ts}] {message}")
+            # Auto-scroll
             sb = self._log_edit.verticalScrollBar()
             sb.setValue(sb.maximum())
 
